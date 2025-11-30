@@ -2,11 +2,14 @@
 
 from abc import ABC, abstractmethod
 
+import cv2
 import numpy as np
 
 
 class Image(ABC):
     """Abstract base class for images."""
+
+    # pylint: disable=no-member
 
     @property
     def width(self) -> int:
@@ -43,3 +46,7 @@ class Image(ABC):
     def _get_data(self) -> np.ndarray:
         """Loads the image data."""
         raise NotImplementedError
+
+    def save(self, path: str) -> None:
+        """Saves the image to the specified file path."""
+        cv2.imwrite(path, self.data)
