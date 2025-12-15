@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 
 #[pymodule]
-mod fishsense_core {
+mod laser {
     use fishsense_core::laser::calibrate_laser as calibrate_laser_rust;
     use ndarray::Array2;
     use numpy::{IntoPyArray, Ix2, PyArray1, PyReadonlyArrayDyn};
