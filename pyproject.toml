@@ -1,0 +1,25 @@
+[build-system]
+# Declare setuptools as the build backend
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fishsense_core" # The name of the main distribution package on PyPI
+version = "0.1.0"
+description = "core of the FishSense Project"
+readme = "README.md"
+requires-python = ">=3.13"
+authors = [
+    {name = "Your Name", email = "your.email@example.com"},
+]
+# Define dependencies for the overall project
+
+[tool.setuptools]
+# Explicitly list the packages to be included in the distribution
+"" = "python"
+packages = ["fishsense_core"]
+
+[tool.uv.workspace]
+members = [
+    "python/fishsense_core",
+]
