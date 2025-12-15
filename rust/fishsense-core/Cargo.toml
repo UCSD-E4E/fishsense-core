@@ -5,3 +5,5 @@ edition = "2024"
 
 [dependencies]
 ndarray = "0.17.1"
+ndarray-linalg = "0.18.0"
+thiserror = "2.0.17"
