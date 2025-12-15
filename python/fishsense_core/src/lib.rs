@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 
 #[pymodule]
-mod laser {
+mod fishsense_core {
     use fishsense_core::laser::calibrate_laser as calibrate_laser_rust;
     use ndarray::Array2;
     use numpy::{IntoPyArray, Ix2, PyArray1, PyReadonlyArrayDyn};
@@ -27,3 +27,15 @@ mod laser {
         Ok((laser_origin_py, laser_orientation_py))
     }
 }
+
+// /// A Python module implemented in Rust.
+// #[pymodule]
+// mod fishsense_core {
+//     use pyo3::prelude::*;
+
+//     /// Formats the sum of two numbers as string.
+//     #[pyfunction]
+//     fn sum_as_string(a: usize, b: usize) -> PyResult<String> {
+//         Ok((a + b).to_string())
+//     }
+// }
