@@ -132,7 +132,7 @@ dependencies = [
 [[package]]
 name = "fishsense-core"
 version = "0.1.0"
-source = { virtual = "python/fishsense_core" }
+source = { editable = "python/fishsense_core" }
 dependencies = [
     { name = "fishsense-api-sdk" },
     { name = "numpy" },
@@ -156,6 +156,9 @@ requires-dist = [
 name = "fishsense-meta"
 version = "0.1.0"
 source = { editable = "." }
+dependencies = [
+    { name = "fishsense-core" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -164,6 +167,7 @@ dev = [
 ]
 
 [package.metadata]
+requires-dist = [{ name = "fishsense-core", editable = "python/fishsense_core" }]
 
 [package.metadata.requires-dev]
 dev = [
