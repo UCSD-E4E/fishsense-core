@@ -1,7 +1,0 @@
-pyproject.toml
-python/fishsense_core/__init__.py
-python/fishsense_core/main.py
-python/fishsense_meta.egg-info/PKG-INFO
-python/fishsense_meta.egg-info/SOURCES.txt
-python/fishsense_meta.egg-info/dependency_links.txt
-python/fishsense_meta.egg-info/top_level.txt
