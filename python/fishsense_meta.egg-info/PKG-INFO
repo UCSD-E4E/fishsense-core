@@ -1,0 +1,7 @@
+Metadata-Version: 2.4
+Name: fishsense-meta
+Version: 0.1.0
+Summary: core of the FishSense Project
+Author-email: Your Name <your.email@example.com>
+Requires-Python: >=3.13
+Description-Content-Type: text/markdown

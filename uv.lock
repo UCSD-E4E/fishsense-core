@@ -1,0 +1,19 @@
+version = 1
+revision = 3
+requires-python = ">=3.13"
+
+[manifest]
+members = [
+    "fishsense-core",
+    "fishsense-meta",
+]
+
+[[package]]
+name = "fishsense-core"
+version = "0.1.0"
+source = { virtual = "python/fishsense_core" }
+
+[[package]]
+name = "fishsense-meta"
+version = "0.1.0"
+source = { editable = "." }
