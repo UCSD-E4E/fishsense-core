@@ -16,8 +16,7 @@ authors = [
 
 [tool.setuptools]
 # Explicitly list the packages to be included in the distribution
-"" = "python"
-packages = ["fishsense_core"]
+packages = ["python/fishsense_core"]
 
 [tool.uv.workspace]
 members = [
