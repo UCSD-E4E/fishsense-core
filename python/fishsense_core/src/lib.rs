@@ -2,7 +2,7 @@ use pyo3::prelude::*;
 
 // A Python module implemented in Rust.
 #[pymodule]
-mod fishsense_core {
+mod _native {
     use pyo3::prelude::*;
 
     #[pymodule]
