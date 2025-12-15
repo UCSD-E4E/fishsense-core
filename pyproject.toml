@@ -14,11 +14,10 @@ dependencies = [
   "fishsense-core",
 ]
 
+[tool.setuptools.packages.find]
+exclude = ["rust*", "target*"]
+
 [tool.uv.workspace]
-exclude = [
-  "rust",
-  "target"
-]
 members = [
   "python/fishsense_core",
 ]
