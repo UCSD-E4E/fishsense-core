@@ -33,7 +33,6 @@ pub fn calibrate_laser(points: &Array2<f32>) -> Result<(ndarray::Array1<f32>, nd
     }
 
     let centroid_option = points.mean_axis(ndarray::Axis(0));
-    println!("{:?}", centroid_option);
     if let Some(centroid) = centroid_option {
         let scale_factor = centroid[2] / laser_orientation[2];
         let mut laser_origin = &centroid - &(scale_factor * &laser_orientation);
