@@ -1,3 +1,3 @@
 pub mod calibration;
 
-pub use calibration::calibrate_laser;
+pub use calibration::{calibrate_laser, LaserCalibrationError};
