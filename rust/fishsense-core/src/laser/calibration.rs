@@ -8,7 +8,7 @@ pub enum LaserCalibrationError {
     CentroidCalculationError,
 }
 
-pub fn calibrate_laser(points: Array2<f32>) -> Result<(ndarray::Array1<f32>, ndarray::Array1<f32>), LaserCalibrationError> {
+pub fn calibrate_laser(points: &Array2<f32>) -> Result<(ndarray::Array1<f32>, ndarray::Array1<f32>), LaserCalibrationError> {
     let mut laser_orientation = Array1::<f32>::zeros(3);
     let &[n, _] = points.shape() else {
         panic!("Shape is not 2-dimensional!") // Panic is okay here since the dimensions are known at compile time
