@@ -1,3 +1,3 @@
-from fishsense_core.fishsense_core.laser.calibration import (
-    calibrate_laser
-)
+import fishsense_core
+
+calibrate_laser = fishsense_core.fishsense_core.laser.calibrate_laser
