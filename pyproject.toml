@@ -12,7 +12,7 @@ requires-python = ">=3.13"
 authors = [
     {name = "Your Name", email = "your.email@example.com"},
 ]
-# Define dependencies for the overall project
+dependencies = []
 
 [tool.setuptools]
 package-dir = { "" = "python" }
@@ -24,4 +24,10 @@ include = ["fishsense_core*"]
 [tool.uv.workspace]
 members = [
     "python/fishsense_core",
+]
+
+[dependency-groups]
+dev = [
+    "black>=25.12.0",
+    "pylint>=4.0.4",
 ]
