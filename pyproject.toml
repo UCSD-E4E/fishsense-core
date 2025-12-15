@@ -15,7 +15,11 @@ authors = [
 # Define dependencies for the overall project
 
 [tool.setuptools]
-packages = ["python/fishsense_core"]
+package-dir = { "" = "python" }
+
+[tool.setuptools.packages.find]
+where = ["python"]
+include = ["fishsense_core*"]
 
 [tool.uv.workspace]
 members = [
