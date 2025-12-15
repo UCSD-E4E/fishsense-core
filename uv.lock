@@ -131,7 +131,6 @@ dependencies = [
 
 [[package]]
 name = "fishsense-core"
-version = "0.1.0"
 source = { editable = "python/fishsense_core" }
 dependencies = [
     { name = "fishsense-api-sdk" },
