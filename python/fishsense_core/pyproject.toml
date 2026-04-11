@@ -25,3 +25,11 @@ dependencies = [
 
 [tool.uv.sources]
 fishsense-api-sdk = { git = "https://github.com/UCSD-E4E/fishsense-api-sdk.git" }
+
+[dependency-groups]
+dev = [
+    "black>=25.12.0",
+    "pylint>=4.0.4",
+    "pytest>=9.0.3",
+    "pytest-cov>=6.0.0",
+]

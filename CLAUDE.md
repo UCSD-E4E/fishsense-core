@@ -23,18 +23,13 @@ cargo test             # run Rust unit tests
 cargo clippy --all-targets --all-features -- -D warnings   # lint (CI standard)
 ```
 
-**Python (uv)**
+**Python (uv)** — run from `python/fishsense_core/`
 ```bash
 uv sync --group dev    # install all deps including dev extras
 uv run pytest          # run Python tests
-uv run pytest tests/path/to/test_file.py::test_name   # run a single test
-uv run pylint python/**/*.py   # lint
-```
-
-**Maturin (build the Rust extension for local Python use)**
-```bash
-cd python/fishsense_core
-maturin develop        # compile and install the extension into the active venv
+uv run pytest fishsense_core/path/to/test_file.py::test_name   # run a single test
+uv run pylint fishsense_core/**/*.py   # lint
+maturin develop        # compile and install the Rust extension into the active venv
 ```
 
 Without running `maturin develop` first, `import fishsense_core._native` will fail at runtime.
@@ -45,7 +40,7 @@ Without running `maturin develop` first, `import fishsense_core._native` will fa
 |---|---|---|
 | `.github/workflows/rust.yml` | every push | clippy → build → test |
 | `.github/workflows/python.yml` | every push | pylint (3.12) + pytest (3.13, 3.14) |
-| `python/fishsense_core/.github/workflows/CI.yml` | push to main/tags, PRs | maturin wheel builds for all platforms; publishes to PyPI on tag push (requires `PYPI_API_TOKEN` secret) |
+| `.github/workflows/maturin.yml` | every push | maturin wheel build check on Linux, Windows, macOS |
 | `.github/workflows/release-please.yml` | push to main | opens a version-bump PR from conventional commits |
 
 ## Versioning
