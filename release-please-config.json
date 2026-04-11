@@ -3,11 +3,11 @@
   "linked-versions": true,
   "packages": {
     "rust/fishsense-core": {
-      "release-type": "cargo",
+      "release-type": "rust",
       "package-name": "fishsense-core"
     },
     "python/fishsense_core": {
-      "release-type": "cargo",
+      "release-type": "rust",
       "package-name": "fishsense_core"
     }
   }
