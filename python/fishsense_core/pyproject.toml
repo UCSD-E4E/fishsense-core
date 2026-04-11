@@ -7,7 +7,7 @@ module-name = "fishsense_core._native"
 
 [project]
 name = "fishsense_core"
-requires-python = ">=3.8"
+requires-python = ">=3.12"
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
