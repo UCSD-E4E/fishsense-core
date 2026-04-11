@@ -3,9 +3,10 @@ use ndarray::Array2;
 use numpy::{IntoPyArray, Ix2, PyArray1, PyReadonlyArrayDyn};
 use pyo3::{exceptions::PyValueError, prelude::*};
 
+type CalibrateLaserResult<'py> = PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)>;
+
 #[pyfunction]
-fn calibrate_laser<'py>(py: Python<'py>, points: PyReadonlyArrayDyn<'py, f64>) ->
-    PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
+fn calibrate_laser<'py>(py: Python<'py>, points: PyReadonlyArrayDyn<'py, f64>) -> CalibrateLaserResult<'py> {
     let points_rust: Array2<f32> = points.as_array()
                         .map(|p| p.to_owned() as f32)
                         .into_dimensionality::<Ix2>()
