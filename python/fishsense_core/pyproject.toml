@@ -26,6 +26,9 @@ dependencies = [
 [tool.uv.sources]
 fishsense-api-sdk = { git = "https://github.com/UCSD-E4E/fishsense-api-sdk.git" }
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [dependency-groups]
 dev = [
     "black>=25.12.0",
