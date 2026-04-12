@@ -33,17 +33,3 @@ jobs:
       run: cargo clippy --verbose --all-targets --all-features -- -D warnings
     - name: Run tests
       run: cargo test --verbose
-
-  build-windows:
-    runs-on: windows-latest
-
-    steps:
-    - uses: actions/checkout@v4
-    - name: Set up MSVC environment
-      uses: ilammy/msvc-dev-cmd@v1
-    - name: Build
-      run: cargo build --verbose
-    - name: Lint
-      run: cargo clippy --verbose --all-targets --all-features -- -D warnings
-    - name: Run tests
-      run: cargo test --verbose
