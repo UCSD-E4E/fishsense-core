@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v0.2.0...fishsense_core-v0.3.0) (2026-04-12)
+
+
+### Features
+
+* additional logging.  gpu-based connected compoennts implementation ([cc18072](https://github.com/UCSD-E4E/fishsense-core/commit/cc18072cb54a12aebb6656f6b232f72c87156f26))
+
 ## [0.2.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v0.1.0...fishsense_core-v0.2.0) (2026-04-11)
 
 
