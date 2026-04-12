@@ -25,13 +25,10 @@ jobs:
   build-macos:
     runs-on: macos-latest
 
-    env:
-      LIBCLANG_PATH: /opt/homebrew/opt/llvm/lib
-
     steps:
     - uses: actions/checkout@v4
     - name: Install dependencies
-      run: brew install llvm opencv
+      run: brew install opencv
     - name: Build
       run: cargo build --verbose
     - name: Lint

@@ -1,0 +1,9 @@
+[target.aarch64-apple-darwin.env]
+# opencv's build script uses bindgen, which requires libclang at runtime.
+# Xcode Command Line Tools provide libclang.dylib without needing brew install llvm.
+LIBCLANG_PATH = "/Library/Developer/CommandLineTools/usr/lib"
+DYLD_LIBRARY_PATH = "/Library/Developer/CommandLineTools/usr/lib"
+
+[target.x86_64-apple-darwin.env]
+LIBCLANG_PATH = "/Library/Developer/CommandLineTools/usr/lib"
+DYLD_LIBRARY_PATH = "/Library/Developer/CommandLineTools/usr/lib"
