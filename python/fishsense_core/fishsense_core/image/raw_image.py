@@ -1,5 +1,6 @@
 """FishSense Core Package"""
 
+import logging
 import math
 from pathlib import Path
 
@@ -10,6 +11,8 @@ from skimage.exposure import adjust_gamma, equalize_adapthist # pylint: disable=
 from skimage.util import img_as_float, img_as_ubyte
 
 from fishsense_core.image.image import Image
+
+_log = logging.getLogger(__name__)
 
 
 class RawImage(Image):
@@ -24,6 +27,7 @@ class RawImage(Image):
 
     def _get_data(self) -> np.ndarray:
         """Loads the raw image from the file path and processes it."""
+        _log.debug("loading raw image: %s", self.__path)
         with self.__path.open("rb") as f:
             with rawpy.imread(f) as raw:
                 img = img_as_float(
@@ -46,9 +50,12 @@ class RawImage(Image):
                 gamma = mid_log / mean_log
                 gamma = 1 / gamma
 
+                _log.debug("auto-gamma: mean_brightness=%.2f gamma=%.4f", mean, gamma)
+
                 img = adjust_gamma(img, gamma=gamma)
                 img = equalize_adapthist(img)
 
                 img = img_as_ubyte(img[:, :, ::-1])
 
+        _log.debug("raw image loaded: shape=%s", img.shape)
         return img

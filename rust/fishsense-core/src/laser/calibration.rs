@@ -1,6 +1,7 @@
 use ndarray::{Array1, Array2};
 use ndarray_linalg::Norm;
 use thiserror::Error;
+use tracing::{debug, instrument, warn};
 
 #[derive(Error, Debug)]
 pub enum LaserCalibrationError {
@@ -8,11 +9,14 @@ pub enum LaserCalibrationError {
     CentroidCalculationError,
 }
 
+#[instrument(skip(points), fields(n_points = points.nrows()))]
 pub fn calibrate_laser(points: &Array2<f32>) -> Result<(ndarray::Array1<f32>, ndarray::Array1<f32>), LaserCalibrationError> {
     let mut laser_orientation = Array1::<f32>::zeros(3);
     let &[n, _] = points.shape() else {
         panic!("Shape is not 2-dimensional!") // Panic is okay here since the dimensions are known at compile time
     };
+
+    debug!(n_points = n, "computing laser orientation");
 
     for i in 0..n {
         for j in 0..n {
@@ -32,14 +36,25 @@ pub fn calibrate_laser(points: &Array2<f32>) -> Result<(ndarray::Array1<f32>, nd
         laser_orientation = -laser_orientation;
     }
 
+    debug!(
+        orientation = ?laser_orientation.as_slice().unwrap(),
+        "laser orientation computed"
+    );
+
     let centroid_option = points.mean_axis(ndarray::Axis(0));
     if let Some(centroid) = centroid_option {
         let scale_factor = centroid[2] / laser_orientation[2];
         let mut laser_origin = &centroid - &(scale_factor * &laser_orientation);
         laser_origin[2] = 0.0; // Ensure laser origin is on the z=0 plane
 
+        debug!(
+            origin = ?laser_origin.as_slice().unwrap(),
+            "laser origin computed"
+        );
+
         Ok((laser_origin, laser_orientation))
     } else {
+        warn!("centroid calculation failed — empty points array?");
         Err(LaserCalibrationError::CentroidCalculationError)
     }
 }
