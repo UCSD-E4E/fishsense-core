@@ -1,1 +1,1 @@
-// pub mod fish_head_tail_detector;
+pub mod fish_head_tail_detector;

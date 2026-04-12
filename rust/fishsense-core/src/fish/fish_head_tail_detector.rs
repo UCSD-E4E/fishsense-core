@@ -1,6 +1,9 @@
-use ndarray::{Array1, Array2};
+use ndarray::Array1;
 
-use crate::spatial::types::DepthMap;
+use crate::{
+    errors::FishSenseError,
+    spatial::{connected_components::connected_components, types::DepthMap},
+};
 
 pub struct ImageCoord(pub Array1<f32>);
 
@@ -12,9 +15,63 @@ pub struct SnappedDepthMap {
 pub struct FishHeadTailDetector {}
 
 impl FishHeadTailDetector {
-    fn snap_to_depth_map(&self, depth_map: &DepthMap, left_img_coord: &ImageCoord, right_img_coord: &ImageCoord) -> SnappedDepthMap {
-        // Implementation for snapping to depth map
-        todo!()
+    /// Snaps `left_img_coord` and `right_img_coord` to the nearest pixel of the
+    /// connected depth component that contains the midpoint between them.
+    ///
+    /// Mirrors the Python `correct_labels` function in 01_process.ipynb:
+    ///   1. Compute the midpoint of the two annotation points.
+    ///   2. Run connected-components on the depth map (epsilon = 0.005).
+    ///   3. Find the component label at the midpoint.
+    ///   4. Snap each annotation to the nearest pixel in that component (L2).
+    ///
+    /// Coordinates are in `[x, y]` order; the depth map is indexed `[row, col]`
+    /// i.e. `[y, x]`.
+    pub async fn snap_to_depth_map(
+        &self,
+        depth_map: &DepthMap,
+        left_img_coord: &ImageCoord,
+        right_img_coord: &ImageCoord,
+    ) -> Result<SnappedDepthMap, FishSenseError> {
+        const EPSILON: f32 = 0.005;
+
+        let labels = connected_components(depth_map, EPSILON).await?;
+
+        // Midpoint in [x, y]; clamp to valid index range.
+        let (height, width) = labels.dim();
+        let mid_x = (((left_img_coord.0[0] + right_img_coord.0[0]) / 2.0).round() as usize)
+            .min(width.saturating_sub(1));
+        let mid_y = (((left_img_coord.0[1] + right_img_coord.0[1]) / 2.0).round() as usize)
+            .min(height.saturating_sub(1));
+
+        let target_label = labels[[mid_y, mid_x]];
+
+        // Collect every pixel in the same component as the midpoint.
+        // Convert from (row, col) → [x, y] to match ImageCoord convention.
+        let component: Vec<[f32; 2]> = labels
+            .indexed_iter()
+            .filter(|&(_, &label)| label == target_label)
+            .map(|((row, col), _)| [col as f32, row as f32])
+            .collect();
+
+        // Find the component pixel nearest to `coord` by squared Euclidean distance.
+        let nearest = |coord: &Array1<f32>| -> Array1<f32> {
+            let cx = coord[0];
+            let cy = coord[1];
+            let best = component
+                .iter()
+                .min_by(|a, b| {
+                    let da = (a[0] - cx).powi(2) + (a[1] - cy).powi(2);
+                    let db = (b[0] - cx).powi(2) + (b[1] - cy).powi(2);
+                    da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .expect("component is non-empty");
+            ndarray::array![best[0], best[1]]
+        };
+
+        Ok(SnappedDepthMap {
+            left: nearest(&left_img_coord.0),
+            right: nearest(&right_img_coord.0),
+        })
     }
 }
 
@@ -39,8 +96,8 @@ mod tests {
     ///   BFS from [3,3] collects the 9-pixel centre block.
     ///   left  snaps to [2,2] — nearest centre-block pixel to [1,1].
     ///   right snaps to [4,4] — nearest centre-block pixel to [5,5].
-    #[test]
-    fn test_snap_to_depth_map_snaps_to_nearest_connected_component() {
+    #[tokio::test]
+    async fn test_snap_to_depth_map_snaps_to_nearest_connected_component() {
         let detector = FishHeadTailDetector {};
 
         let mut depth_data = Array2::<f32>::zeros((7, 7));
@@ -54,7 +111,7 @@ mod tests {
         let left = ImageCoord(array![1.0_f32, 1.0]);
         let right = ImageCoord(array![5.0_f32, 5.0]);
 
-        let result = detector.snap_to_depth_map(&depth_map, &left, &right);
+        let result = detector.snap_to_depth_map(&depth_map, &left, &right).await.unwrap();
 
         assert_eq!(result.left[0] as i32, 2, "left x should snap to 2");
         assert_eq!(result.left[1] as i32, 2, "left y should snap to 2");
@@ -66,8 +123,8 @@ mod tests {
     /// be returned unchanged (nearest component point is themselves).
     ///
     /// Setup: uniform 5×5 depth map — the whole grid is one component.
-    #[test]
-    fn test_snap_to_depth_map_no_change_when_already_on_component() {
+    #[tokio::test]
+    async fn test_snap_to_depth_map_no_change_when_already_on_component() {
         let detector = FishHeadTailDetector {};
 
         let depth_map = DepthMap(Array2::<f32>::from_elem((5, 5), 0.5));
@@ -75,7 +132,7 @@ mod tests {
         let left = ImageCoord(array![0.0_f32, 0.0]);
         let right = ImageCoord(array![4.0_f32, 4.0]);
 
-        let result = detector.snap_to_depth_map(&depth_map, &left, &right);
+        let result = detector.snap_to_depth_map(&depth_map, &left, &right).await.unwrap();
 
         assert_eq!(result.left[0] as i32, 0, "left x should stay 0");
         assert_eq!(result.left[1] as i32, 0, "left y should stay 0");
@@ -86,8 +143,8 @@ mod tests {
     /// When both annotations coincide the midpoint is the same pixel and the BFS
     /// component still needs to contain at least that pixel; both outputs snap to
     /// the same nearest component point.
-    #[test]
-    fn test_snap_to_depth_map_coincident_annotations() {
+    #[tokio::test]
+    async fn test_snap_to_depth_map_coincident_annotations() {
         let detector = FishHeadTailDetector {};
 
         let mut depth_data = Array2::<f32>::zeros((5, 5));
@@ -99,7 +156,7 @@ mod tests {
         let left = ImageCoord(array![2.0_f32, 2.0]);
         let right = ImageCoord(array![2.0_f32, 2.0]);
 
-        let result = detector.snap_to_depth_map(&depth_map, &left, &right);
+        let result = detector.snap_to_depth_map(&depth_map, &left, &right).await.unwrap();
 
         assert_eq!(result.left[0] as i32, 2);
         assert_eq!(result.left[1] as i32, 2);
