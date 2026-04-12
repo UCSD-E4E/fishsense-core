@@ -21,25 +21,3 @@ jobs:
           working-directory: python/fishsense_core
           args: --release --out dist --find-interpreter
           sccache: true
-
-  build-macos:
-    runs-on: macos-latest
-
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: 3.x
-      - name: Install dependencies
-        run: brew install opencv
-      - name: Set libclang path
-        run: |
-          LIBCLANG_DIR="$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib"
-          echo "LIBCLANG_PATH=$LIBCLANG_DIR" >> $GITHUB_ENV
-          echo "DYLD_LIBRARY_PATH=$LIBCLANG_DIR" >> $GITHUB_ENV
-      - name: Build wheel
-        uses: PyO3/maturin-action@v1
-        with:
-          working-directory: python/fishsense_core
-          args: --release --out dist --find-interpreter
-          sccache: true
