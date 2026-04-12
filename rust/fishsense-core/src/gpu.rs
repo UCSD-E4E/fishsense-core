@@ -6,8 +6,10 @@ use crate::errors::FishSenseError;
 pub async fn get_device_and_queue() -> Result<(Device, Queue), FishSenseError> {
     let instance = wgpu::Instance::default();
 
-    let mut request_options = wgpu::RequestAdapterOptions::default();
-    request_options.power_preference = PowerPreference::HighPerformance;
+    let request_options = wgpu::RequestAdapterOptions {
+        power_preference: PowerPreference::HighPerformance,
+        ..Default::default()
+    };
 
     let adapter = instance
         .request_adapter(&request_options)

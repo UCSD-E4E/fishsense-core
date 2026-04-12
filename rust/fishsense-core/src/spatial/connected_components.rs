@@ -21,6 +21,7 @@ struct ConnectedComponentsParameters {
 /// Dispatches one named compute pass using a pre-built bind group and pipeline layout.
 /// All three passes share the same layout so `init`/`flatten` (which don't read
 /// `depth_map`) still accept the same 3-buffer bind group as `merge`.
+#[allow(clippy::too_many_arguments)]
 fn dispatch_pass(
     entry_point: &str,
     bind_group: &wgpu::BindGroup,
