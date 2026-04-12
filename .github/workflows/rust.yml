@@ -6,9 +6,20 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-
+  build-ubuntu:
     runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build
+      run: cargo build --verbose
+    - name: Lint
+      run: cargo clippy --verbose --all-targets --all-features -- -D warnings
+    - name: Run tests
+      run: cargo test --verbose
+
+  build-macos:
+    runs-on: macos-latest
 
     steps:
     - uses: actions/checkout@v4
