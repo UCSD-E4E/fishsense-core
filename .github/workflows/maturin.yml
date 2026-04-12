@@ -3,11 +3,8 @@ name: Maturin
 on: [push]
 
 jobs:
-  build:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+  build-ubuntu:
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
@@ -18,6 +15,21 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y mesa-vulkan-drivers libvulkan1 clang libclang-dev libopencv-dev
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: python/fishsense_core
+          args: --release --out dist --find-interpreter
+          sccache: true
+
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: 3.x libopencv-dev
       - name: Build wheel
         uses: PyO3/maturin-action@v1
         with:
