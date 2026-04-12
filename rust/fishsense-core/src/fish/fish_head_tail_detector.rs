@@ -1,4 +1,5 @@
 use ndarray::Array1;
+use tracing::{debug, instrument};
 
 use crate::{
     errors::FishSenseError,
@@ -32,6 +33,7 @@ impl FishHeadTailDetector {
     ///    component that contains the midpoint (see `snap_to_depth_map`).
     ///
     /// Returns `SnappedDepthMap { left: head, right: tail }`.
+    #[instrument(skip(self, mask, depth_map), fields(height = mask.dim().0, width = mask.dim().1))]
     pub async fn find_head_tail(
         &self,
         mask: &Array2<u8>,
@@ -41,6 +43,11 @@ impl FishHeadTailDetector {
         let pca = estimate_endpoints(mask)?;
         let left = pca.left;
         let right = pca.right;
+        debug!(
+            left_x = left[0], left_y = left[1],
+            right_x = right[0], right_y = right[1],
+            "PCA endpoints estimated"
+        );
 
         // ── Stage 2: Geometry refinement ───────────────────────────────────
         let perimeter = extract_perimeter(mask);
@@ -53,6 +60,11 @@ impl FishHeadTailDetector {
         let classified = classify_from_perimeter(&perimeter, left, right)?;
         let head = classified.head;
         let tail = classified.tail;
+        debug!(
+            head_x = head[0], head_y = head[1],
+            tail_x = tail[0], tail_y = tail[1],
+            "head/tail classified from perimeter"
+        );
 
         // Build the two polygon halves for correction.
         let scale = compute_scale(&perimeter, head, tail);
@@ -78,6 +90,11 @@ impl FishHeadTailDetector {
 
         let head_corrected = correct_head(head, tail, &head_half, scale);
         let tail_corrected = correct_tail(head, tail, &tail_half, scale);
+        debug!(
+            head_x = head_corrected[0], head_y = head_corrected[1],
+            tail_x = tail_corrected[0], tail_y = tail_corrected[1],
+            "endpoints corrected via polygon geometry"
+        );
 
         // ── Stage 3: Snap to depth map ──────────────────────────────────────
         let head_coord = ImageCoord(ndarray::array![
@@ -93,6 +110,11 @@ impl FishHeadTailDetector {
             .snap_to_depth_map(depth_map, &head_coord, &tail_coord)
             .await?;
 
+        debug!(
+            head_x = snapped.left[0], head_y = snapped.left[1],
+            tail_x = snapped.right[0], tail_y = snapped.right[1],
+            "endpoints snapped to depth component"
+        );
         Ok(snapped)
     }
 
@@ -107,6 +129,7 @@ impl FishHeadTailDetector {
     ///
     /// Coordinates are in `[x, y]` order; the depth map is indexed `[row, col]`
     /// i.e. `[y, x]`.
+    #[instrument(skip(self, depth_map, left_img_coord, right_img_coord))]
     pub async fn snap_to_depth_map(
         &self,
         depth_map: &DepthMap,
@@ -125,6 +148,7 @@ impl FishHeadTailDetector {
             .min(height.saturating_sub(1));
 
         let target_label = labels[[mid_y, mid_x]];
+        debug!(mid_x, mid_y, target_label, "midpoint component identified");
 
         // Collect every pixel in the same component as the midpoint.
         // Convert from (row, col) → [x, y] to match ImageCoord convention.

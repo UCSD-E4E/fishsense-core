@@ -1,6 +1,8 @@
 use std::cmp::{max, min};
 use std::ffi::c_void;
 
+use tracing::{debug, instrument};
+
 type InferenceOutputs = (ArrayD<f32>, ArrayD<f32>, ArrayD<f32>);
 
 use ndarray::{s, Array2, Array3, ArrayD, Axis, IxDyn};
@@ -67,10 +69,15 @@ impl FishSegmentation {
         builder.commit_from_memory(MODEL_BYTES)
     }
 
+    #[instrument(skip(self))]
     pub fn load_model(&mut self) -> Result<(), SegmentationError> {
         if !self.model_set {
+            debug!("loading embedded ONNX model");
             self.model = Some(Self::create_model()?);
             self.model_set = true;
+            debug!("model loaded");
+        } else {
+            debug!("model already loaded, skipping");
         }
         Ok(())
     }
@@ -350,12 +357,14 @@ impl FishSegmentation {
         Ok(complete3.remove_axis(Axis(2)))
     }
 
+    #[instrument(skip(self, img), fields(height = img.dim().0, width = img.dim().1))]
     pub fn inference(&mut self, img: &Array3<u8>) -> Result<Array2<u8>, SegmentationError> {
         let (orig_h, orig_w, _) = img.dim();
 
         let resized = self.resize_img(img)?;
         let padded = self.pad_img(&resized).mapv(|v| v as f32);
         let (new_h, new_w, _) = resized.dim();
+        debug!(orig_h, orig_w, resized_h = new_h, resized_w = new_w, "image pre-processed");
 
         let width_scale = orig_w as f32 / new_w as f32;
         let height_scale = orig_h as f32 / new_h as f32;
@@ -366,16 +375,20 @@ impl FishSegmentation {
         // no fish are present.  Treat any ORT session-run error as "no fish
         // detected" and return an all-zero mask so callers handle it gracefully.
         match Self::do_inference(&padded, model) {
-            Ok((boxes, masks, scores)) => self.convert_output_to_mask(
-                &boxes,
-                &masks,
-                &scores,
-                width_scale,
-                height_scale,
-                img.dim(),
-            ),
+            Ok((boxes, masks, scores)) => {
+                let n_detections = scores.iter().filter(|&&s| s > Self::SCORE_THRESHOLD).count();
+                debug!(n_detections, "inference succeeded");
+                self.convert_output_to_mask(
+                    &boxes,
+                    &masks,
+                    &scores,
+                    width_scale,
+                    height_scale,
+                    img.dim(),
+                )
+            }
             Err(ort_err) => {
-                tracing::debug!("ORT inference error (likely no fish): {ort_err}");
+                debug!("ORT inference error (likely no fish): {ort_err}");
                 Ok(Array2::<u8>::zeros((orig_h, orig_w)))
             }
         }

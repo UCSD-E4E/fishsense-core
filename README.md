@@ -62,6 +62,19 @@ Rust functions are available directly through `fishsense_core._native` (e.g. `_n
 
 **Prerequisites:** Rust toolchain, Python 3.13+, [uv](https://docs.astral.sh/uv/)
 
+**macOS:** The `opencv` crate requires `libclang` at build time. Add the following to your `~/.zshrc` (or `.envrc` if you use direnv):
+
+```bash
+export LIBCLANG_PATH="$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib"
+export DYLD_LIBRARY_PATH="$LIBCLANG_PATH"
+```
+
+**Ubuntu:** Install system dependencies before building:
+
+```bash
+sudo apt-get install -y clang libclang-dev libopencv-dev
+```
+
 ```bash
 # Install Python dependencies and build the Rust extension
 cd python/fishsense_core

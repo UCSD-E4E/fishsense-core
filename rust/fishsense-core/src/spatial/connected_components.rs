@@ -1,7 +1,7 @@
 use anyhow::Context;
 use bytemuck::{Pod, Zeroable};
 use ndarray::Array2;
-use tracing::instrument;
+use tracing::{debug, info, instrument, warn};
 use wgpu::{util::DeviceExt, CommandEncoder, Device, ShaderModule};
 
 use crate::{errors::FishSenseError, gpu::get_device_and_queue};
@@ -51,17 +51,19 @@ fn dispatch_pass(
     cpass.dispatch_workgroups(width.div_ceil(16), height.div_ceil(16), 1);
 }
 
-/// Labels every pixel in `depth_map` with its connected-component group.
-///
-/// Returns an `Array2<u32>` of the same shape where pixels whose depth values
-/// differ by at most `epsilon` and are 4-connected share the same non-zero label.
-/// Labels are the flat index of each component's root pixel (scan order).
-#[instrument(skip(depth_map), fields(width, height))]
-pub async fn connected_components(
+/// GPU implementation of connected components.  Prefer [`connected_components`],
+/// which falls back to [`connected_components_cpu`] automatically when no GPU
+/// is available.
+#[instrument(skip(depth_map), fields(width = tracing::field::Empty, height = tracing::field::Empty))]
+pub async fn connected_components_gpu(
     depth_map: &DepthMap,
     epsilon: f32,
 ) -> Result<Groups, FishSenseError> {
     let (height, width) = depth_map.0.dim();
+    tracing::Span::current()
+        .record("width", width)
+        .record("height", height);
+    debug!(width, height, epsilon, "running GPU connected components");
     let pixel_count = (width * height) as u64;
     let y_pred_size = pixel_count * size_of::<u32>() as u64;
 
@@ -218,17 +220,48 @@ fn union_cpu(parent: &mut [u32], a: u32, b: u32) {
     }
 }
 
+/// Labels every pixel in `depth_map` with its connected-component group.
+///
+/// Tries the GPU path first; if no hardware-backed adapter is available
+/// (`CannotAcquireGpu`) it transparently falls back to [`connected_components_cpu`].
+/// Which path was taken is logged at `info` level.
+///
+/// Returns an `Array2<u32>` of the same shape where pixels whose depth values
+/// differ by at most `epsilon` and are 4-connected share the same non-zero label.
+/// Labels are the flat index of each component's root pixel (scan order).
+pub async fn connected_components(
+    depth_map: &DepthMap,
+    epsilon: f32,
+) -> Result<Groups, FishSenseError> {
+    match connected_components_gpu(depth_map, epsilon).await {
+        Ok(result) => {
+            info!("connected components: using GPU path");
+            Ok(result)
+        }
+        Err(FishSenseError::CannotAcquireGpu) => {
+            warn!("no GPU available, falling back to CPU for connected components");
+            connected_components_cpu(depth_map, epsilon)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// CPU fallback for [`connected_components`].
 ///
 /// Mirrors the three-pass ECL-CC algorithm from the GPU shader using a
 /// sequential union-find with full path compression.  Use this when no
 /// hardware-backed wGPU adapter is available (`DeviceType::Cpu` or
 /// `CannotAcquireGpu`).
+#[instrument(skip(depth_map), fields(width = tracing::field::Empty, height = tracing::field::Empty))]
 pub fn connected_components_cpu(
     depth_map: &DepthMap,
     epsilon: f32,
 ) -> Result<Groups, FishSenseError> {
     let (height, width) = depth_map.0.dim();
+    tracing::Span::current()
+        .record("width", width)
+        .record("height", height);
+    debug!(width, height, epsilon, "running CPU connected components");
     let n = width * height;
     let depths = depth_map
         .0
@@ -563,7 +596,7 @@ mod tests {
         for row in 0..4usize { for col in 5..8usize { data[[row, col]] = 0.5; } }
         let depth_map = DepthMap(data);
 
-        let gpu_labels = connected_components(&depth_map, EPSILON).await.unwrap();
+        let gpu_labels = connected_components_gpu(&depth_map, EPSILON).await.unwrap();
         let cpu_labels = connected_components_cpu(&depth_map, EPSILON).unwrap();
 
         assert_eq!(gpu_labels, cpu_labels, "GPU and CPU label maps must be identical");
