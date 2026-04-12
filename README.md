@@ -16,7 +16,7 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-fishsense-core = { git = "https://github.com/UCSD-E4E/fishsense-core", tag = "v0.1.0" }
+fishsense-core = { git = "https://github.com/UCSD-E4E/fishsense-core", tag = "v0.2.0" } # x-release-please-version
 ```
 
 Key types and functions:
@@ -36,7 +36,7 @@ Add to `pyproject.toml` (requires the Rust toolchain to build):
 dependencies = ["fishsense-core"]
 
 [tool.uv.sources]
-fishsense-core = { git = "https://github.com/UCSD-E4E/fishsense-core", tag = "v0.1.0", subdirectory = "python/fishsense_core" }
+fishsense-core = { git = "https://github.com/UCSD-E4E/fishsense-core", tag = "v0.2.0", subdirectory = "python/fishsense_core" } # x-release-please-version
 ```
 
 Python API:
