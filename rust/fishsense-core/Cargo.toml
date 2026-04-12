@@ -2,6 +2,7 @@
 name = "fishsense-core"
 version = "0.2.0"
 edition = "2024"
+build = "build.rs"
 
 [features]
 tracing-init = ["dep:tracing-subscriber"]
@@ -9,6 +10,11 @@ tracing-init = ["dep:tracing-subscriber"]
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ndarray-npy = "0.10"
+ndarray-stats = "0.7"
+
+[build-dependencies]
+reqwest = { version = "0.12", features = ["blocking"] }
 
 [dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
@@ -18,6 +24,8 @@ geo = "0.29"
 nalgebra = "0.33"
 ndarray = "0.17.1"
 ndarray-linalg = "0.18.0"
+opencv = { version = "0.94", default-features = false, features = ["imgproc"] }
+ort = { version = "2.0.0-rc.12", features = ["download-binaries"] }
 thiserror = "2.0.17"
 tracing = "0.1"
 wgpu = "29.0.1"
