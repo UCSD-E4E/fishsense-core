@@ -4,13 +4,14 @@ version = "0.2.0"
 edition = "2024"
 
 [features]
-tracing-init = []
+tracing-init = ["dep:tracing-subscriber"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 anyhow = "1.0.102"
 bytemuck = { version = "1.25.0", features = ["derive"] }
 ndarray = "0.17.1"
