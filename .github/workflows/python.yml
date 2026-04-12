@@ -40,6 +40,8 @@ jobs:
         python-version: ${{ matrix.python-version }}
     - name: Install dependencies
       run: |
+        sudo apt-get update
+        sudo apt-get install -y mesa-vulkan-drivers libvulkan1 clang libclang-dev libopencv-dev
         python -m pip install --upgrade pip uv
         uv sync --group dev
     - name: Run tests
