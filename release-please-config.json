@@ -1,7 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
   "linked-versions": true,
-  "include-component-in-tag": false,
   "packages": {
     "rust/fishsense-core": {
       "release-type": "rust",
