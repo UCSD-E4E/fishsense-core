@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v0.4.0...fishsense-core-v0.4.1) (2026-04-13)
+
+
+### Bug Fixes
+
+* build downloads fishial from onnx.  need to use a connection timeout not a stream timeout ([0ce6d0b](https://github.com/UCSD-E4E/fishsense-core/commit/0ce6d0bc0944adffc0ae4e348fbe5ace721d165c))
+
 ## [0.4.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v0.3.0...fishsense-core-v0.4.0) (2026-04-13)
 
 
