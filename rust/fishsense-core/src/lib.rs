@@ -3,6 +3,7 @@ pub mod fish;
 pub mod gpu;
 pub mod laser;
 pub mod spatial;
+pub mod world_point_handler;
 
 /// Call once at the top of a test (or `main`) to emit tracing output.
 ///

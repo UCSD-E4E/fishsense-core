@@ -1,4 +1,5 @@
 use ndarray::Array1;
+use std::ops::Index;
 use tracing::{debug, instrument};
 
 use crate::{
@@ -10,35 +11,46 @@ use crate::{
         },
         fish_pca::estimate_endpoints,
     },
-    spatial::{connected_components::connected_components, types::DepthMap},
+    spatial::{
+        connected_components::connected_components,
+        types::{DepthCoord, DepthMap, ImageCoord},
+    },
 };
 use geo::{Closest, ClosestPoint, Distance, Euclidean, Point};
 use ndarray::Array2;
 
-pub struct ImageCoord(pub Array1<f32>);
+impl Index<usize> for DepthCoord {
+    type Output = f32;
+    fn index(&self, i: usize) -> &f32 {
+        &self.0[i]
+    }
+}
+
+pub struct HeadTailCoords {
+    pub head: ImageCoord,
+    pub tail: ImageCoord,
+}
 
 pub struct SnappedDepthMap {
-    pub left: Array1<f32>,
-    pub right: Array1<f32>,
+    pub left: DepthCoord,
+    pub right: DepthCoord,
 }
 
 pub struct FishHeadTailDetector {}
 
 impl FishHeadTailDetector {
-    /// Full three-stage pipeline: PCA → geometry refinement → depth-map snap.
+    /// Two-stage pipeline: PCA → geometry refinement.
     ///
     /// 1. Estimates raw endpoints with PCA from the binary `mask`.
     /// 2. Classifies and corrects head/tail using polygon geometry.
-    /// 3. Snaps each corrected point to the nearest pixel of the depth
-    ///    component that contains the midpoint (see `snap_to_depth_map`).
     ///
-    /// Returns `SnappedDepthMap { left: head, right: tail }`.
-    #[instrument(skip(self, mask, depth_map), fields(height = mask.dim().0, width = mask.dim().1))]
-    pub async fn find_head_tail(
+    /// Returns `HeadTailCoords { head, tail }` in image (pixel) coordinates.
+    /// Call `find_head_tail_depth` if you also need depth-map snapping.
+    #[instrument(skip(self, mask), fields(height = mask.dim().0, width = mask.dim().1))]
+    pub fn find_head_tail_img(
         &self,
         mask: &Array2<u8>,
-        depth_map: &DepthMap,
-    ) -> Result<SnappedDepthMap, FishSenseError> {
+    ) -> Result<HeadTailCoords, FishSenseError> {
         // ── Stage 1: PCA ────────────────────────────────────────────────────
         let pca = estimate_endpoints(mask)?;
         let left = pca.left;
@@ -96,23 +108,41 @@ impl FishHeadTailDetector {
             "endpoints corrected via polygon geometry"
         );
 
-        // ── Stage 3: Snap to depth map ──────────────────────────────────────
-        let head_coord = ImageCoord(ndarray::array![
-            head_corrected[0] as f32,
-            head_corrected[1] as f32
-        ]);
-        let tail_coord = ImageCoord(ndarray::array![
-            tail_corrected[0] as f32,
-            tail_corrected[1] as f32
-        ]);
+        Ok(HeadTailCoords {
+            head: ImageCoord(ndarray::array![
+                head_corrected[0] as f32,
+                head_corrected[1] as f32
+            ]),
+            tail: ImageCoord(ndarray::array![
+                tail_corrected[0] as f32,
+                tail_corrected[1] as f32
+            ]),
+        })
+    }
 
+    /// Full three-stage pipeline: PCA → geometry refinement → depth-map snap.
+    ///
+    /// Calls `find_head_tail_img` for stages 1–2, then snaps each corrected
+    /// point to the nearest pixel of the depth component that contains the
+    /// midpoint (see `snap_to_depth_map`).
+    ///
+    /// Returns `SnappedDepthMap { left: head, right: tail }`.
+    #[instrument(skip(self, mask, depth_map), fields(height = mask.dim().0, width = mask.dim().1))]
+    pub async fn find_head_tail_depth(
+        &self,
+        mask: &Array2<u8>,
+        depth_map: &DepthMap,
+    ) -> Result<SnappedDepthMap, FishSenseError> {
+        let coords = self.find_head_tail_img(mask)?;
+
+        // ── Stage 3: Snap to depth map ──────────────────────────────────────
         let snapped = self
-            .snap_to_depth_map(depth_map, &head_coord, &tail_coord)
+            .snap_to_depth_map(depth_map, &coords.head, &coords.tail)
             .await?;
 
         debug!(
-            head_x = snapped.left[0], head_y = snapped.left[1],
-            tail_x = snapped.right[0], tail_y = snapped.right[1],
+            head_x = snapped.left.0[0], head_y = snapped.left.0[1],
+            tail_x = snapped.right.0[0], tail_y = snapped.right.0[1],
             "endpoints snapped to depth component"
         );
         Ok(snapped)
@@ -174,8 +204,8 @@ impl FishHeadTailDetector {
         };
 
         Ok(SnappedDepthMap {
-            left: nearest(&left_img_coord.0),
-            right: nearest(&right_img_coord.0),
+            left: DepthCoord(nearest(&left_img_coord.0)),
+            right: DepthCoord(nearest(&right_img_coord.0)),
         })
     }
 }
@@ -260,7 +290,7 @@ mod tests {
         // Uniform depth map — everything is one component.
         let depth_map = DepthMap(Array2::<f32>::from_elem((20, 60), 1.0));
 
-        let result = detector.find_head_tail(&mask, &depth_map).await;
+        let result = detector.find_head_tail_depth(&mask, &depth_map).await;
         assert!(result.is_ok(), "find_head_tail failed: {:?}", result.err());
         let snapped = result.unwrap();
 
@@ -306,7 +336,7 @@ mod tests {
         }
         let depth_map = DepthMap(depth_data);
 
-        let result = detector.find_head_tail(&mask, &depth_map).await;
+        let result = detector.find_head_tail_depth(&mask, &depth_map).await;
         assert!(result.is_ok());
         let snapped = result.unwrap();
 
@@ -332,6 +362,164 @@ mod tests {
         let detector = FishHeadTailDetector {};
         let mask = Array2::<u8>::zeros((20, 60));
         let depth_map = DepthMap(Array2::<f32>::from_elem((20, 60), 1.0));
-        assert!(detector.find_head_tail(&mask, &depth_map).await.is_err());
+        assert!(detector.find_head_tail_depth(&mask, &depth_map).await.is_err());
+    }
+
+    // ── find_head_tail_img unit tests ─────────────────────────────────────
+
+    /// `find_head_tail_img` is sync and requires no depth map.
+    /// Endpoints of a horizontal bar should be near the two extreme columns.
+    #[test]
+    fn test_find_head_tail_img_horizontal_bar() {
+        let detector = FishHeadTailDetector {};
+
+        let mut mask = Array2::<u8>::zeros((20, 60));
+        for r in 8..12 {
+            for c in 2..58 {
+                mask[[r, c]] = 1;
+            }
+        }
+
+        let result = detector.find_head_tail_img(&mask);
+        assert!(result.is_ok(), "find_head_tail_img failed: {:?}", result.err());
+        let coords = result.unwrap();
+
+        let head_col = coords.head.0[0] as usize;
+        let tail_col = coords.tail.0[0] as usize;
+        let (min_col, max_col) = if head_col < tail_col {
+            (head_col, tail_col)
+        } else {
+            (tail_col, head_col)
+        };
+
+        assert!(
+            min_col <= 5,
+            "one img endpoint should be near col 2, got cols {head_col} and {tail_col}"
+        );
+        assert!(
+            max_col >= 55,
+            "other img endpoint should be near col 57, got cols {head_col} and {tail_col}"
+        );
+    }
+
+    /// Endpoints of a vertical bar should be near the two extreme rows.
+    #[test]
+    fn test_find_head_tail_img_vertical_bar() {
+        let detector = FishHeadTailDetector {};
+
+        // Vertical bar: cols 8..12, rows 2..58 in a 60×20 image.
+        let mut mask = Array2::<u8>::zeros((60, 20));
+        for r in 2..58 {
+            for c in 8..12 {
+                mask[[r, c]] = 1;
+            }
+        }
+
+        let result = detector.find_head_tail_img(&mask);
+        assert!(result.is_ok(), "find_head_tail_img failed: {:?}", result.err());
+        let coords = result.unwrap();
+
+        // y is index 1 in [x, y] ImageCoord.
+        let head_row = coords.head.0[1] as usize;
+        let tail_row = coords.tail.0[1] as usize;
+        let (min_row, max_row) = if head_row < tail_row {
+            (head_row, tail_row)
+        } else {
+            (tail_row, head_row)
+        };
+
+        assert!(
+            min_row <= 5,
+            "one img endpoint should be near row 2, got rows {head_row} and {tail_row}"
+        );
+        assert!(
+            max_row >= 55,
+            "other img endpoint should be near row 57, got rows {head_row} and {tail_row}"
+        );
+    }
+
+    /// Returned image coordinates must lie within the mask bounding box.
+    #[test]
+    fn test_find_head_tail_img_coords_within_mask_bounding_box() {
+        let detector = FishHeadTailDetector {};
+
+        let mut mask = Array2::<u8>::zeros((20, 60));
+        for r in 8..12 {
+            for c in 2..58 {
+                mask[[r, c]] = 1;
+            }
+        }
+
+        let coords = detector.find_head_tail_img(&mask).unwrap();
+
+        for (label, coord) in [("head", &coords.head), ("tail", &coords.tail)] {
+            let x = coord.0[0] as usize;
+            let y = coord.0[1] as usize;
+            assert!(
+                x < 60,
+                "{label} x={x} is out of image width"
+            );
+            assert!(
+                y < 20,
+                "{label} y={y} is out of image height"
+            );
+        }
+    }
+
+    /// Empty mask → `find_head_tail_img` should return `Err` (no depth map needed).
+    #[test]
+    fn test_find_head_tail_img_empty_mask_returns_err() {
+        let detector = FishHeadTailDetector {};
+        let mask = Array2::<u8>::zeros((20, 60));
+        assert!(detector.find_head_tail_img(&mask).is_err());
+    }
+
+    /// When the depth component covers only the centre of the mask, snapping
+    /// must pull the endpoints inward relative to the raw image coordinates.
+    /// This verifies that `find_head_tail_depth` ≠ `find_head_tail_img` when
+    /// the depth coverage is limited.
+    #[tokio::test]
+    async fn test_find_head_tail_depth_snaps_endpoints_toward_depth_component() {
+        let detector = FishHeadTailDetector {};
+
+        // Full-width horizontal bar mask.
+        let mut mask = Array2::<u8>::zeros((20, 60));
+        for r in 8..12 {
+            for c in 0..60 {
+                mask[[r, c]] = 1;
+            }
+        }
+
+        // Depth map only covers the centre strip (cols 20..40).
+        let mut depth_data = Array2::<f32>::zeros((20, 60));
+        for r in 8..12 {
+            for c in 20..40 {
+                depth_data[[r, c]] = 1.0;
+            }
+        }
+        let depth_map = DepthMap(depth_data);
+
+        // img coords should span nearly the full width (near cols 0 and 59).
+        let img = detector.find_head_tail_img(&mask).unwrap();
+        let img_head_col = img.head.0[0];
+        let img_tail_col = img.tail.0[0];
+        let img_span = (img_head_col - img_tail_col).abs();
+        assert!(
+            img_span >= 50.0,
+            "img endpoints should span the full bar, got cols {img_head_col} and {img_tail_col}"
+        );
+
+        // depth coords must be snapped inside the centre strip (cols 20..40).
+        let snapped = detector.find_head_tail_depth(&mask, &depth_map).await.unwrap();
+        let snapped_head_col = snapped.left[0] as usize;
+        let snapped_tail_col = snapped.right[0] as usize;
+        assert!(
+            (20..40).contains(&snapped_head_col),
+            "snapped head col {snapped_head_col} should be inside depth strip 20..40"
+        );
+        assert!(
+            (20..40).contains(&snapped_tail_col),
+            "snapped tail col {snapped_tail_col} should be inside depth strip 20..40"
+        );
     }
 }

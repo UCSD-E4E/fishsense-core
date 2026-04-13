@@ -18,13 +18,15 @@ pyproject.toml            # Root uv workspace + fishsense-meta package
 src/
   errors.rs                        # FishSenseError enum
   gpu.rs                           # wGPU device/queue acquisition
+  world_point_handler.rs           # WorldPointHandler — projects image coords to 3D via K⁻¹
   laser/calibration.rs             # calibrate_laser() — 3D laser origin + orientation
   fish/fish_segmentation.rs        # FishSegmentation — ONNX instance segmentation (FishIAL)
   fish/fish_head_tail_detector.rs  # FishHeadTailDetector — 3-stage head/tail pipeline
+  fish/fish_length_calculator.rs   # FishLengthCalculator — 3D fish length from depth map
   fish/fish_pca.rs                 # estimate_endpoints() — PCA on fish mask
   fish/fish_geometry.rs            # perimeter extraction, polygon splitting, endpoint correction
   spatial/connected_components.rs  # connected_components() — GPU compute via wGPU (WGSL)
-  spatial/types.rs                 # DepthMap(Array2<f32>) newtype
+  spatial/types.rs                 # ImageCoord, DepthCoord, DepthMap newtypes
 ```
 
 ### Python package map

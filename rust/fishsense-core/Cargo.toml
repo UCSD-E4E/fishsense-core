@@ -23,7 +23,7 @@ bytemuck = { version = "1.25.0", features = ["derive"] }
 geo = "0.29"
 nalgebra = "0.33"
 ndarray = "0.17.1"
-ndarray-linalg = "0.18.0"
+ndarray-linalg = { version = "0.18.0", features = ["openblas-system"] }
 opencv = { version = "0.98", default-features = false, features = ["imgproc"] }
 ort = { version = "2.0.0-rc.12", features = ["download-binaries"] }
 thiserror = "2.0.17"

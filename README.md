@@ -7,6 +7,7 @@ Core algorithms for the [FishSense](https://e4e.ucsd.edu/fishsense) project. The
 - **Laser calibration** — estimates 3D laser origin and orientation from observed points
 - **Fish segmentation** — ONNX-based instance segmentation (FishIAL / Mask R-CNN) that returns per-fish instance masks
 - **Head/tail detection** — three-stage pipeline (PCA → polygon geometry → depth-map snapping) that localises head and tail in image coordinates
+- **Fish length** — projects head/tail image coordinates into 3D world space via the inverse camera intrinsics and computes the Euclidean distance
 - **Spatial processing** — GPU-accelerated connected-components labelling for depth maps via wGPU compute shaders
 - **Image utilities** — raw camera decoding, auto-gamma, CLAHE, and distortion correction
 
@@ -23,8 +24,9 @@ Key types and functions:
 
 ```rust
 use fishsense_core::laser::calibrate_laser;
-use fishsense_core::fish::{FishSegmentation, FishHeadTailDetector};
+use fishsense_core::fish::{FishSegmentation, FishHeadTailDetector, FishLengthCalculator};
 use fishsense_core::spatial::connected_components;
+use fishsense_core::world_point_handler::WorldPointHandler;
 ```
 
 ## Using from Python
@@ -94,15 +96,17 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 ```
 rust/fishsense-core/src/
-  errors.rs                   # FishSenseError enum
-  gpu.rs                      # wGPU device/queue acquisition
-  laser/calibration.rs        # Laser 3D calibration
-  fish/fish_segmentation.rs   # ONNX instance segmentation
+  errors.rs                        # FishSenseError enum
+  gpu.rs                           # wGPU device/queue acquisition
+  world_point_handler.rs           # WorldPointHandler — image coord → 3D via K⁻¹
+  laser/calibration.rs             # Laser 3D calibration
+  fish/fish_segmentation.rs        # ONNX instance segmentation
   fish/fish_head_tail_detector.rs  # Head/tail localisation pipeline
-  fish/fish_pca.rs            # PCA-based endpoint estimation
-  fish/fish_geometry.rs       # Polygon perimeter and endpoint correction
+  fish/fish_length_calculator.rs   # 3D fish length from depth map
+  fish/fish_pca.rs                 # PCA-based endpoint estimation
+  fish/fish_geometry.rs            # Polygon perimeter and endpoint correction
   spatial/connected_components.rs  # GPU connected-components (WGSL shader)
-  spatial/types.rs            # DepthMap wrapper
+  spatial/types.rs                 # ImageCoord, DepthCoord, DepthMap newtypes
 
 python/fishsense_core/
   src/lib.rs                  # PyO3 module registration (_native)
