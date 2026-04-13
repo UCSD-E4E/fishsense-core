@@ -19,8 +19,8 @@ mod tests {
 
     #[test]
     fn compute_world_point_from_depth() {
-        let image_point = array![889.63158192f32, 336.58548892f32];
-        let depth = 0.5355310460918119f32;
+        let image_point = array![889.631_6_f32, 336.585_48_f32];
+        let depth = 0.535_531_04_f32;
         let camera_intrinsics_inverted = array![[0.00070161547, 0.0, 0.0], [0.0, 0.00070161547, 0.0], [-0.67513853, -0.5045314, 1.0]].t().mapv(|v| v as f32);
 
         let world_point_handler = WorldPointHandler {
