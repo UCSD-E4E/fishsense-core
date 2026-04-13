@@ -90,6 +90,9 @@ cargo test
 # Lint
 uv run pylint fishsense_core/**/*.py
 cargo clippy --all-targets --all-features -- -D warnings
+
+# Validate WGSL shaders (requires naga-cli: cargo install naga-cli)
+find . -name '*.wgsl' -exec naga {} \;
 ```
 
 ## Repository structure

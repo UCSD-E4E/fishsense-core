@@ -65,7 +65,10 @@ The Python package exposes Rust functions through `fishsense_core._native`. New 
 cargo build            # build all workspace members
 cargo test             # run Rust unit tests
 cargo clippy --all-targets --all-features -- -D warnings   # lint (CI standard)
+naga rust/fishsense-core/src/spatial/connected_components.wgsl   # validate WGSL shader
 ```
+
+Install `naga-cli` with `cargo install naga-cli` before running the shader validator.
 
 **Python (uv)** — run from `python/fishsense_core/`
 ```bash
@@ -82,7 +85,7 @@ uv run pylint fishsense_core/**/*.py   # lint
 
 | File | Trigger | Purpose |
 |---|---|---|
-| `.github/workflows/rust.yml` | every push | clippy → build → test |
+| `.github/workflows/rust.yml` | every push | clippy → WGSL validation (naga-cli) → build → test |
 | `.github/workflows/python.yml` | every push | pylint (3.12) + pytest (3.13, 3.14) |
 | `.github/workflows/maturin.yml` | every push | maturin wheel build check on Linux, Windows, macOS |
 | `.github/workflows/release-please.yml` | push to main | opens a version-bump PR from conventional commits |
