@@ -1,4 +1,5 @@
 {
+  ".": "0.4.0",
   "rust/fishsense-core": "0.4.0",
   "python/fishsense_core": "0.4.0"
 }
