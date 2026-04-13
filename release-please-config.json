@@ -8,11 +8,11 @@
       "extra-files": [
         {
           "type": "generic",
-          "path": "README.md"
+          "path": "../../README.md"
         },
         {
           "type": "generic",
-          "path": "version.txt"
+          "path": "../../version.txt"
         }
       ]
     },
