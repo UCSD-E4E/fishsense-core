@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v0.3.0...fishsense-core-v0.4.0) (2026-04-13)
+
+
+### Features
+
+* add fish length calculation and world coord handling ([2e838c7](https://github.com/UCSD-E4E/fishsense-core/commit/2e838c75b583e9fae21cedef4b0e5a97ca4d7edb))
+
+
+### Bug Fixes
+
+* clippy issues ([79e86f7](https://github.com/UCSD-E4E/fishsense-core/commit/79e86f7cebc1b33dc7634664d0ab88a8785baa42))
+
 ## [0.3.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v0.2.0...fishsense-core-v0.3.0) (2026-04-12)
 
 
