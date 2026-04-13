@@ -17,7 +17,7 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-fishsense-core = { git = "https://github.com/UCSD-E4E/fishsense-core", tag = "fishsense-core-v0.5.0" } # x-release-please-version
+fishsense-core = { git = "https://github.com/UCSD-E4E/fishsense-core", tag = "fishsense_core-v0.5.0" } # x-release-please-version
 ```
 
 Key types and functions:
