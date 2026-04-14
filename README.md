@@ -15,12 +15,10 @@ Core algorithms for the [FishSense](https://e4e.ucsd.edu/fishsense) project. The
 
 Add to `Cargo.toml`:
 
-<!-- x-release-please-start-version -->
 ```toml
 [dependencies]
 fishsense-core = { git = "https://github.com/UCSD-E4E/fishsense-core", tag = "fishsense-core-v0.8.0" }
 ```
-<!-- x-release-please-end -->
 
 Key types and functions:
 
@@ -35,7 +33,6 @@ use fishsense_core::world_point_handler::WorldPointHandler;
 
 Add to `pyproject.toml` (requires the Rust toolchain to build):
 
-<!-- x-release-please-start-version -->
 ```toml
 [project]
 dependencies = ["fishsense-core"]
@@ -43,7 +40,6 @@ dependencies = ["fishsense-core"]
 [tool.uv.sources]
 fishsense-core = { git = "https://github.com/UCSD-E4E/fishsense-core", tag = "fishsense_core-v0.8.0", subdirectory = "python/fishsense_core" }
 ```
-<!-- x-release-please-end -->
 
 Python API:
 
