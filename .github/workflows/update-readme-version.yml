@@ -1,20 +1,21 @@
 name: Update README version on release branch
 
 on:
-  push:
-    branches:
-      - "release-please--**"
+  workflow_run:
+    workflows: ["Release Please"]
+    types: [completed]
 
 permissions:
   contents: write
 
 jobs:
   update-readme:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref }}
+          ref: release-please--branches--main
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Read version from manifest
@@ -39,4 +40,4 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add README.md
           git commit -m "chore: update README to ${{ steps.version.outputs.version }}"
-          git push origin HEAD:${{ github.ref_name }}
+          git push origin HEAD:release-please--branches--main
