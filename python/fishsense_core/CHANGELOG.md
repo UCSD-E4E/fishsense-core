@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v0.5.0...fishsense_core-v0.5.1) (2026-04-14)
+
+
+### Bug Fixes
+
+* create uv.lock in the python directory ([048c221](https://github.com/UCSD-E4E/fishsense-core/commit/048c221afd3c7abde023812e937c5ef9c788076a))
+
 ## [0.5.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v0.4.0...fishsense_core-v0.5.0) (2026-04-13)
 
 

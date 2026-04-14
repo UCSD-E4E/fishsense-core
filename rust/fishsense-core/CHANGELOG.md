@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.2](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v0.4.1...fishsense-core-v0.4.2) (2026-04-14)
+
+
+### Bug Fixes
+
+* prevent OOM in extract_perimeter on degenerate masks ([47e284a](https://github.com/UCSD-E4E/fishsense-core/commit/47e284a40ec378d877fa7f6256dd71ffcd03a156))
+
 ## [0.4.1](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v0.4.0...fishsense-core-v0.4.1) (2026-04-13)
 
 
