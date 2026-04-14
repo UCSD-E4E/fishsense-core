@@ -11,7 +11,13 @@
   "packages": {
     "rust/fishsense-core": {
       "release-type": "rust",
-      "package-name": "fishsense-core"
+      "package-name": "fishsense-core",
+      "extra-files": [
+        {
+          "type": "generic",
+          "path": "/README.md"
+        }
+      ]
     },
     "python/fishsense_core": {
       "release-type": "rust",
