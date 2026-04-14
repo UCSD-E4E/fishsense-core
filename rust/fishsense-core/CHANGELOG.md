@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.8.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v0.7.0...fishsense-core-v0.8.0) (2026-04-14)
+
+
+### Features
+
+* add additional tracing ([321b5a2](https://github.com/UCSD-E4E/fishsense-core/commit/321b5a210d778671481a01dde353b8d690d4cf07))
+* add fish length calculation and world coord handling ([2e838c7](https://github.com/UCSD-E4E/fishsense-core/commit/2e838c75b583e9fae21cedef4b0e5a97ca4d7edb))
+* additional logging.  gpu-based connected compoennts implementation ([cc18072](https://github.com/UCSD-E4E/fishsense-core/commit/cc18072cb54a12aebb6656f6b232f72c87156f26))
+* bring all versions up to date ([2ed4c25](https://github.com/UCSD-E4E/fishsense-core/commit/2ed4c25727f0f7c6982a474b949056056357c4a8))
+* cpu fallback for connected components. ([345073f](https://github.com/UCSD-E4E/fishsense-core/commit/345073f88ea803b18465d6d7e385e52d827b7021))
+* expose calibrate laser method ([1a7d903](https://github.com/UCSD-E4E/fishsense-core/commit/1a7d903463944b1af2ec76dc05e775340fb74336))
+* fish head tail snap to depth map ([50120bb](https://github.com/UCSD-E4E/fishsense-core/commit/50120bbac317e82385296ecfbb625a5118f650ae))
+* fishial-based segmentation ([2476059](https://github.com/UCSD-E4E/fishsense-core/commit/2476059cd1a6957874b7bd505d0f3b6894b0221d))
+* introduce fishsense-core rust package ([6dde82c](https://github.com/UCSD-E4E/fishsense-core/commit/6dde82c152ca99d621b9955bcb744258aed20a42))
+* introduce head/tail detector ([5f902d4](https://github.com/UCSD-E4E/fishsense-core/commit/5f902d4f53f2d445cd97668ae6fd74c3c6f77a89))
+* rust implementation of laser calibration ([f5675ea](https://github.com/UCSD-E4E/fishsense-core/commit/f5675ea352932613d434aca556eafb664ea02965))
+* unit tests.  run pytest on ubuntu ([27b64b7](https://github.com/UCSD-E4E/fishsense-core/commit/27b64b725f6cb26289e0df855d24f7c679b12924))
+
+
+### Bug Fixes
+
+* add missing export ([ef213bf](https://github.com/UCSD-E4E/fishsense-core/commit/ef213bf434452d9290ee24feb1d0159d03e1e4fc))
+* build downloads fishial from onnx.  need to use a connection timeout not a stream timeout ([0ce6d0b](https://github.com/UCSD-E4E/fishsense-core/commit/0ce6d0bc0944adffc0ae4e348fbe5ace721d165c))
+* clippy issues ([79e86f7](https://github.com/UCSD-E4E/fishsense-core/commit/79e86f7cebc1b33dc7634664d0ab88a8785baa42))
+* do calibration in f64 rather than f32 ([24fd90d](https://github.com/UCSD-E4E/fishsense-core/commit/24fd90dfa25af25e88da0f989c1cf5c233b69e9f))
+* ensure tha the laser_origin z is on the z=0 plane ([0bd7d72](https://github.com/UCSD-E4E/fishsense-core/commit/0bd7d72c531b2ae16bfcc02d23d85302eb57c0e2))
+* fishsense_core package name ([154514b](https://github.com/UCSD-E4E/fishsense-core/commit/154514b3a3a45124170b8d13e1e700a494d2c274))
+* prevent OOM in extract_perimeter on degenerate masks ([47e284a](https://github.com/UCSD-E4E/fishsense-core/commit/47e284a40ec378d877fa7f6256dd71ffcd03a156))
+* print centroid option ([7fd7442](https://github.com/UCSD-E4E/fishsense-core/commit/7fd74426aab94b166836f553d7db188c0d046729))
+* rust build issues and release please build issues ([47061b9](https://github.com/UCSD-E4E/fishsense-core/commit/47061b9b59f324d9c07f617912ee4855cc6c946e))
+* update opencv version and make sure that cargo can find libclang ([62cfe1d](https://github.com/UCSD-E4E/fishsense-core/commit/62cfe1d3b6d16cc8f54f7cfeb1a8ed9c7f77eb61))
+
 ## [0.4.2](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v0.4.1...fishsense-core-v0.4.2) (2026-04-14)
 
 
