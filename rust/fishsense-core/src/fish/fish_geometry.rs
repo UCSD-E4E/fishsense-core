@@ -56,15 +56,37 @@ pub fn extract_perimeter(mask: &Array2<u8>) -> Vec<[f64; 2]> {
             .any(|&(nr, nc)| !in_bounds(nr, nc) || mask[[nr as usize, nc as usize]] == 0)
     };
 
+    // Trivial collector used for empty, tiny, or pathological masks where the
+    // Moore boundary trace either has nothing to do or cannot be trusted to
+    // form a closed loop.
+    let collect_all_boundary = || -> Vec<[f64; 2]> {
+        mask.indexed_iter()
+            .filter(|(_, v)| **v != 0)
+            .filter(|((r, c), _)| is_boundary(*r, *c))
+            .map(|((r, c), _)| [c as f64, r as f64])
+            .collect()
+    };
+
+    // Count non-zero pixels up-front. This is the only quantity that can bound
+    // the boundary-trace loop, and it lets us shortcut degenerate inputs
+    // (noise from the segmentation model) before doing any tracing at all.
+    let nnz = mask.iter().filter(|&&v| v != 0).count();
+    if nnz == 0 {
+        return vec![];
+    }
+    // For very small masks the Moore trace can enter a sub-cycle that never
+    // returns to the seed; just enumerate boundary pixels directly.
+    const TRACE_MIN_NNZ: usize = 8;
+    if nnz < TRACE_MIN_NNZ {
+        return collect_all_boundary();
+    }
+
     // Find the first non-zero pixel as the seed.
-    let seed = mask
+    let (seed_row, seed_col) = mask
         .indexed_iter()
         .find(|(_, v)| **v != 0)
-        .map(|((r, c), _)| (r, c));
-
-    let Some((seed_row, seed_col)) = seed else {
-        return vec![];
-    };
+        .map(|((r, c), _)| (r, c))
+        .expect("nnz > 0 guarantees a non-zero pixel exists");
 
     // 8-connected Moore neighbourhood, clockwise.
     const DIRS: [(i32, i32); 8] = [
@@ -85,7 +107,19 @@ pub fn extract_perimeter(mask: &Array2<u8>) -> Vec<[f64; 2]> {
     let mut cur = (seed_row, seed_col);
     let mut dir_idx = 0usize;
 
+    // Hard upper bound on iterations: each pixel can legitimately be visited
+    // at most a handful of times during a Moore trace, so 8·nnz is generous
+    // while still guaranteeing termination on pathological inputs.
+    let max_iter = nnz.saturating_mul(8).saturating_add(16);
+    let mut iter_count = 0usize;
+    let mut aborted = false;
+
     loop {
+        iter_count += 1;
+        if iter_count > max_iter {
+            aborted = true;
+            break;
+        }
         if !visited.insert(cur) && cur == (seed_row, seed_col) && !boundary.is_empty() {
             break;
         }
@@ -114,14 +148,10 @@ pub fn extract_perimeter(mask: &Array2<u8>) -> Vec<[f64; 2]> {
         }
     }
 
-    // Fallback for thin bars: collect all boundary pixels directly.
-    if boundary.len() < 3 {
-        boundary = mask
-            .indexed_iter()
-            .filter(|(_, v)| **v != 0)
-            .filter(|((r, c), _)| is_boundary(*r, *c))
-            .map(|((r, c), _)| [c as f64, r as f64])
-            .collect();
+    // Fallback for thin bars or aborted traces: collect all boundary pixels
+    // directly. Discard whatever partial trace the loop accumulated.
+    if aborted || boundary.len() < 3 {
+        boundary = collect_all_boundary();
     }
 
     boundary
@@ -460,6 +490,38 @@ mod tests {
         );
         // At least the 8 border pixels should appear.
         assert!(p.len() >= 8, "expected ≥8 perimeter points, got {}", p.len());
+    }
+
+    /// Regression: a 4-non-zero-pixel mask (segmentation noise) used to send
+    /// the Moore boundary trace into a sub-cycle that never returned to the
+    /// seed, growing `boundary` without bound until the process was OOM-killed
+    /// (observed on iOS, EXC_RESOURCE high watermark inside extract_perimeter).
+    #[test]
+    fn test_perimeter_four_pixel_noise_terminates_quickly() {
+        let mask = mask_from_pixels(64, 64, &[(10, 10), (10, 11), (11, 10), (30, 40)]);
+        let start = std::time::Instant::now();
+        let p = extract_perimeter(&mask);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < 100,
+            "extract_perimeter took {elapsed:?} on a 4-pixel mask"
+        );
+        assert!(!p.is_empty());
+        assert!(p.len() <= 4);
+    }
+
+    #[test]
+    fn test_perimeter_one_pixel_wide_line_terminates() {
+        let pixels: Vec<(usize, usize)> = (5..25).map(|c| (10, c)).collect();
+        let mask = mask_from_pixels(32, 32, &pixels);
+        let start = std::time::Instant::now();
+        let p = extract_perimeter(&mask);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < 100,
+            "extract_perimeter took {elapsed:?} on a 1-pixel-wide line"
+        );
+        assert!(!p.is_empty());
     }
 
     #[test]
