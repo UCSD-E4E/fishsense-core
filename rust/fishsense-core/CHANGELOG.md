@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v0.8.0...fishsense-core-v1.0.0) (2026-04-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* correct depth indexing convention and support downsampled depth maps
+
+### Bug Fixes
+
+* correct depth indexing convention and support downsampled depth maps ([c1dfdc3](https://github.com/UCSD-E4E/fishsense-core/commit/c1dfdc32b938bca59052067685f97ddc603a6755))
+
 ## [0.8.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v0.7.0...fishsense-core-v0.8.0) (2026-04-14)
 
 
