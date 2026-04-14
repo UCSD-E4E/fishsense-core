@@ -1,24 +1,27 @@
 {
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
-  "linked-versions": true,
+  "plugins": [
+    {
+      "type": "linked-versions",
+      "groupName": "fishsense",
+      "components": ["fishsense-core", "fishsense_core"],
+      "merge": false
+    }
+  ],
   "packages": {
-    ".": {
-      "release-type": "simple",
-      "skip-github-release": true,
-      "extra-files": [
-        {
-          "type": "generic",
-          "path": "README.md"
-        }
-      ]
-    },
     "rust/fishsense-core": {
       "release-type": "rust",
       "package-name": "fishsense-core"
     },
     "python/fishsense_core": {
       "release-type": "rust",
-      "package-name": "fishsense_core"
+      "package-name": "fishsense_core",
+      "extra-files": [
+        {
+          "type": "generic",
+          "path": "../../README.md"
+        }
+      ]
     }
   }
 }
