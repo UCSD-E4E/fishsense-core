@@ -8,9 +8,12 @@
 //! Coordinates are `[col, row]` (i.e. `[x, y]`) throughout.
 
 use geo::{
-    Area, BooleanOps, Closest, ClosestPoint, ConvexHull, Distance, Euclidean, Intersects,
-    LineString, MultiPolygon, Point, Polygon,
+    Area, BooleanOps, Closest, ClosestPoint, ConvexHull, Distance, Euclidean, LineString,
+    MultiPolygon, Point, Polygon,
 };
+use opencv::core::{Mat, Point2i, Vector, CV_8UC1};
+use opencv::imgproc::{find_contours_with_hierarchy, CHAIN_APPROX_NONE, RETR_EXTERNAL};
+use std::ffi::c_void;
 
 // ── private helpers ───────────────────────────────────────────────────────────
 
@@ -38,123 +41,57 @@ pub struct ClassifiedEndpoints {
 
 // ── perimeter extraction ──────────────────────────────────────────────────
 
-/// Extracts an ordered list of boundary pixels from a binary mask using a
-/// Moore neighbourhood boundary trace.
+/// Extracts the ordered boundary of the largest external component of a
+/// binary mask using `cv::findContours` (CHAIN_APPROX_NONE, RETR_EXTERNAL).
 ///
-/// Returns pixels in `[col, row]` order. Returns an empty `Vec` when the mask
-/// contains no non-zero pixels.
+/// Returns pixels in `[col, row]` order, topologically ordered around the
+/// contour so the resulting `LineString` forms a non-self-intersecting loop.
+/// Returns an empty `Vec` when the mask contains no non-zero pixels.
+///
+/// The previous hand-rolled Moore trace fell back to scanline enumeration on
+/// complex shapes (forked tails), which silently produced self-crossing
+/// "polygons" whose geometric ops were nonsense — hence the regression to
+/// `findContours`, which guarantees a valid ordering.
 pub fn extract_perimeter(mask: &Array2<u8>) -> Vec<[f64; 2]> {
-    let (height, width) = mask.dim();
-
-    // Predicate: pixel (row, col) is on the 4-connected boundary.
-    let in_bounds = |r: i32, c: i32| r >= 0 && r < height as i32 && c >= 0 && c < width as i32;
-    let is_boundary = |row: usize, col: usize| -> bool {
-        let r = row as i32;
-        let c = col as i32;
-        [(r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)]
-            .iter()
-            .any(|&(nr, nc)| !in_bounds(nr, nc) || mask[[nr as usize, nc as usize]] == 0)
-    };
-
-    // Trivial collector used for empty, tiny, or pathological masks where the
-    // Moore boundary trace either has nothing to do or cannot be trusted to
-    // form a closed loop.
-    let collect_all_boundary = || -> Vec<[f64; 2]> {
-        mask.indexed_iter()
-            .filter(|(_, v)| **v != 0)
-            .filter(|((r, c), _)| is_boundary(*r, *c))
-            .map(|((r, c), _)| [c as f64, r as f64])
-            .collect()
-    };
-
-    // Count non-zero pixels up-front. This is the only quantity that can bound
-    // the boundary-trace loop, and it lets us shortcut degenerate inputs
-    // (noise from the segmentation model) before doing any tracing at all.
-    let nnz = mask.iter().filter(|&&v| v != 0).count();
-    if nnz == 0 {
+    if !mask.iter().any(|&v| v != 0) {
         return vec![];
     }
-    // For very small masks the Moore trace can enter a sub-cycle that never
-    // returns to the seed; just enumerate boundary pixels directly.
-    const TRACE_MIN_NNZ: usize = 8;
-    if nnz < TRACE_MIN_NNZ {
-        return collect_all_boundary();
+
+    let arr = mask.as_standard_layout();
+    let (height, width) = arr.dim();
+    let data_ptr = arr.as_ptr() as *mut c_void;
+
+    // SAFETY: the Mat borrows `arr`'s storage; `arr` lives for this function
+    // and is dropped after the Mat.
+    let mat = match unsafe {
+        Mat::new_rows_cols_with_data_unsafe_def(height as i32, width as i32, CV_8UC1, data_ptr)
+    } {
+        Ok(m) => m,
+        Err(_) => return vec![],
+    };
+
+    let mut contours: Vector<Vector<Point2i>> = Vector::new();
+    let mut hierarchy: Vector<opencv::core::Vec4i> = Vector::new();
+    if find_contours_with_hierarchy(
+        &mat,
+        &mut contours,
+        &mut hierarchy,
+        RETR_EXTERNAL,
+        CHAIN_APPROX_NONE,
+        Point2i::new(0, 0),
+    )
+    .is_err()
+    {
+        return vec![];
     }
 
-    // Find the first non-zero pixel as the seed.
-    let (seed_row, seed_col) = mask
-        .indexed_iter()
-        .find(|(_, v)| **v != 0)
-        .map(|((r, c), _)| (r, c))
-        .expect("nnz > 0 guarantees a non-zero pixel exists");
+    // Multiple disjoint components (e.g. segmentation noise) yield multiple
+    // external contours; pick the longest, which corresponds to the fish.
+    let Some(largest) = contours.iter().max_by_key(|c| c.len()) else {
+        return vec![];
+    };
 
-    // 8-connected Moore neighbourhood, clockwise.
-    const DIRS: [(i32, i32); 8] = [
-        (-1, 0),
-        (-1, 1),
-        (0, 1),
-        (1, 1),
-        (1, 0),
-        (1, -1),
-        (0, -1),
-        (-1, -1),
-    ];
-
-    let mut boundary: Vec<[f64; 2]> = Vec::new();
-    let mut visited: std::collections::HashSet<(usize, usize)> =
-        std::collections::HashSet::new();
-
-    let mut cur = (seed_row, seed_col);
-    let mut dir_idx = 0usize;
-
-    // Hard upper bound on iterations: each pixel can legitimately be visited
-    // at most a handful of times during a Moore trace, so 8·nnz is generous
-    // while still guaranteeing termination on pathological inputs.
-    let max_iter = nnz.saturating_mul(8).saturating_add(16);
-    let mut iter_count = 0usize;
-    let mut aborted = false;
-
-    loop {
-        iter_count += 1;
-        if iter_count > max_iter {
-            aborted = true;
-            break;
-        }
-        if !visited.insert(cur) && cur == (seed_row, seed_col) && !boundary.is_empty() {
-            break;
-        }
-        if is_boundary(cur.0, cur.1) {
-            boundary.push([cur.1 as f64, cur.0 as f64]);
-        }
-
-        let mut found = false;
-        for i in 0..8 {
-            let try_dir = (dir_idx + i) % 8;
-            let (dr, dc) = DIRS[try_dir];
-            let nr = cur.0 as i32 + dr;
-            let nc = cur.1 as i32 + dc;
-            if in_bounds(nr, nc) && mask[[nr as usize, nc as usize]] != 0 {
-                cur = (nr as usize, nc as usize);
-                dir_idx = try_dir;
-                found = true;
-                break;
-            }
-        }
-        if !found {
-            break;
-        }
-        if cur == (seed_row, seed_col) && boundary.len() > 1 {
-            break;
-        }
-    }
-
-    // Fallback for thin bars or aborted traces: collect all boundary pixels
-    // directly. Discard whatever partial trace the loop accumulated.
-    if aborted || boundary.len() < 3 {
-        boundary = collect_all_boundary();
-    }
-
-    boundary
+    largest.iter().map(|p| [p.x as f64, p.y as f64]).collect()
 }
 
 // ── geometry helpers ──────────────────────────────────────────────────────
@@ -367,11 +304,26 @@ pub fn correct_head(
     [nearest.x(), nearest.y()]
 }
 
+/// Fraction of `tail_half.unsigned_area()` below which a concavity is treated
+/// as mask noise and excluded from the fork-apex search.
+const FORK_MIN_AREA_FRACTION: f64 = 0.01;
+
 /// Refines the tail endpoint (port of `correct_tail_coord`).
 ///
-/// Computes the convex-hull difference of `tail_half`, finds the piece closest
-/// to the extended tail direction, and snaps to its boundary if the current
-/// tail point lies inside it; otherwise leaves the tail unchanged.
+/// Takes the convex-hull difference of `tail_half` (which yields every
+/// concavity in the caudal-fin silhouette), drops concavities smaller than
+/// [`FORK_MIN_AREA_FRACTION`] of the half's area, and snaps the tail to the
+/// head-ward apex of the concavity whose apex lies nearest the raw tail —
+/// the fork vertex for a forked caudal fin. When `tail_half` has no
+/// significant concavities (rounded / pointed caudal fin) the tail is
+/// returned unchanged.
+///
+/// Previously this function compared boundary-to-`extended` distances and
+/// only applied the correction if the raw tail already lay inside a
+/// concavity. For a forked caudal fin the PCA tail is the tip of one lobe
+/// (on the convex hull, not inside any concavity) and a one-pixel
+/// mask-noise pocket at that tip always beat the real fork notch on
+/// boundary-distance — so the tail never moved to the fork.
 pub fn correct_tail(
     head: [f64; 2],
     tail: [f64; 2],
@@ -387,8 +339,8 @@ pub fn correct_tail(
     let ux = dx / len;
     let uy = dy / len;
 
-    let extended = Point::new(tail[0] + ux * scale * 2.0, tail[1] + uy * scale * 2.0);
     let head_extended = Point::new(head[0] - ux * scale * 2.0, head[1] - uy * scale * 2.0);
+    let tail_pt = Point::new(tail[0], tail[1]);
 
     let hull: Polygon<f64> = tail_half.convex_hull();
     let diff: MultiPolygon<f64> = hull.difference(tail_half);
@@ -397,25 +349,26 @@ pub fn correct_tail(
         return tail;
     }
 
-    let closest_diff = diff
+    let min_area = tail_half.unsigned_area() * FORK_MIN_AREA_FRACTION;
+
+    let chosen = diff
         .0
         .iter()
+        .filter(|p| p.unsigned_area() >= min_area)
         .min_by(|a, b| {
-            let da: f64 = dist_pt_line(extended, a.exterior());
-            let db: f64 = dist_pt_line(extended, b.exterior());
+            let apex_a = nearest_on_boundary(a, head_extended);
+            let apex_b = nearest_on_boundary(b, head_extended);
+            let da = Euclidean::distance(tail_pt, apex_a);
+            let db = Euclidean::distance(tail_pt, apex_b);
             da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-        })
-        .unwrap();
+        });
 
-    let tail_pt = Point::new(tail[0], tail[1]);
-    let tail_in_poly =
-        closest_diff.intersects(&tail_pt) || closest_diff.exterior().intersects(&tail_pt);
-
-    if tail_in_poly {
-        let nearest = nearest_on_boundary(closest_diff, head_extended);
-        [nearest.x(), nearest.y()]
-    } else {
-        tail
+    match chosen {
+        Some(c) => {
+            let apex = nearest_on_boundary(c, head_extended);
+            [apex.x(), apex.y()]
+        }
+        None => tail,
     }
 }
 
