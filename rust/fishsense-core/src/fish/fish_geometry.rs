@@ -175,11 +175,27 @@ pub fn split_polygon(
     (clip(&half_left), clip(&half_right))
 }
 
-/// Area of `convex_hull(poly) - poly`.
-fn convex_difference_area(poly: &Polygon<f64>) -> f64 {
+/// Distance from `point` to the boundary of `poly`'s largest concavity.
+///
+/// "Concavity" here means a piece of `convex_hull(poly) - poly` — the regions
+/// the hull bridges over. Returns `INFINITY` when the half is convex.
+///
+/// A caudal fork's tips sit on the hull, *at vertices of the fork-notch
+/// concavity*, so for the fork-side half this distance is ≈ 0. A snout tip
+/// sits on the hull but nowhere near any concavity, so for the snout-side half
+/// this distance is large. This is the tail-vs-head discriminator used by
+/// [`classify_from_perimeter`].
+fn largest_concavity_distance_to_point(poly: &Polygon<f64>, point: [f64; 2]) -> f64 {
     let hull: Polygon<f64> = poly.convex_hull();
     let diff: MultiPolygon<f64> = hull.difference(poly);
-    diff.0.iter().map(|p| p.unsigned_area()).sum()
+    let Some(largest) = diff.0.iter().max_by(|a, b| {
+        a.unsigned_area()
+            .partial_cmp(&b.unsigned_area())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    }) else {
+        return f64::INFINITY;
+    };
+    dist_pt_line(Point::new(point[0], point[1]), largest.exterior())
 }
 
 /// Nearest point on `poly`'s exterior boundary to `query`.
@@ -212,6 +228,18 @@ pub fn classify(
 }
 
 /// Core classification logic given an already-extracted perimeter.
+///
+/// Splits the polygon with the perpendicular bisector of `left`–`right`, then
+/// asks of each half: how close does its PCA endpoint sit to its largest
+/// concavity? A fork tip is a vertex of the fork-notch concavity, so the fork
+/// side's distance is ≈ 0; a snout tip has no concavity nearby. The endpoint
+/// with the smaller distance is the tail.
+///
+/// The previous heuristic compared the two halves' total convex-hull-minus-
+/// polygon area. That fails on fish whose head half happens to contain more
+/// concave area than the tail half — notably, fish with a prominent dorsal
+/// fin — because the dorsal-fin concavity outweighs the caudal-fork notch.
+/// Downstream `correct_tail` then pulls the "tail" onto the dorsal-fin notch.
 pub fn classify_from_perimeter(
     perimeter: &[[f64; 2]],
     left: [f64; 2],
@@ -230,31 +258,41 @@ pub fn classify_from_perimeter(
     let (perp_a, perp_b) = perpendicular_bisector(left, right, scale);
     let (half0, half1) = split_polygon(&poly, perp_a, perp_b);
 
-    let area0 = convex_difference_area(&half0);
-    let area1 = convex_difference_area(&half1);
-
-    let (tail_half, head_half, tail_area, head_area) = if area0 >= area1 {
-        (&half0, &half1, area0, area1)
-    } else {
-        (&half1, &half0, area1, area0)
-    };
-
+    // Associate each PCA endpoint with the half whose exterior it lies on.
+    // `left` and `right` are extremes along the same axis, so they land in
+    // opposite halves; testing one endpoint is enough.
     let left_pt = Point::new(left[0], left[1]);
-
-    let left_to_tail: f64 = dist_pt_line(left_pt, tail_half.exterior());
-    let left_to_head: f64 = dist_pt_line(left_pt, head_half.exterior());
-
-    let (head, tail) = if left_to_head <= left_to_tail {
-        (left, right)
+    let (left_half, right_half) = if dist_pt_line(left_pt, half0.exterior())
+        <= dist_pt_line(left_pt, half1.exterior())
+    {
+        (&half0, &half1)
     } else {
-        (right, left)
+        (&half1, &half0)
     };
 
-    let max_area = tail_area.max(head_area);
-    let confidence = if max_area < 1e-12 {
-        0.5
+    let d_left = largest_concavity_distance_to_point(left_half, left);
+    let d_right = largest_concavity_distance_to_point(right_half, right);
+
+    let (head, tail) = if d_left <= d_right {
+        (right, left)
     } else {
-        ((tail_area - head_area) / max_area / 2.0 + 0.5).min(1.0)
+        (left, right)
+    };
+
+    // Confidence: how one-sided the signal is. Saturates at 1.0 when one
+    // endpoint is on a concavity and the other is far from any.
+    let confidence = if d_left.is_finite() && d_right.is_finite() {
+        let max_d = d_left.max(d_right);
+        if max_d < 1e-12 {
+            0.5
+        } else {
+            ((d_left - d_right).abs() / max_d / 2.0 + 0.5).clamp(0.5, 1.0)
+        }
+    } else if d_left.is_finite() || d_right.is_finite() {
+        // One half is convex, the other has a concavity → strong signal.
+        1.0
+    } else {
+        0.5
     };
 
     Ok(ClassifiedEndpoints {
