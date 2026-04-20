@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v1.1.0...fishsense-core-v1.2.0) (2026-04-20)
+
+
+### Bug Fixes
+
+* head/tail refinement fails ([e4c4dc7](https://github.com/UCSD-E4E/fishsense-core/commit/e4c4dc722ddd66a5f5196653c651faaceeb5bf0e))
+
 ## [1.1.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v1.0.0...fishsense-core-v1.1.0) (2026-04-20)
 
 

@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.2.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v1.1.0...fishsense_core-v1.2.0) (2026-04-20)
+
+
+### Features
+
+* fish head tail detector ([c68ee34](https://github.com/UCSD-E4E/fishsense-core/commit/c68ee34b1f859bb2eb81ffcaaa75f8b9ead98b55))
+
+
+### Bug Fixes
+
+* don't init the logger if another one is already inited ([012f672](https://github.com/UCSD-E4E/fishsense-core/commit/012f6723e26359668721b968905445eb1b7bc6eb))
+* pyo3 submodule issues ([4ef48da](https://github.com/UCSD-E4E/fishsense-core/commit/4ef48da141ada974d0dc459610bdacdd9fdedf73))
+
 ## [1.1.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v1.0.0...fishsense_core-v1.1.0) (2026-04-20)
 
 
