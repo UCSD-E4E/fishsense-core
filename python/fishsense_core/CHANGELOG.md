@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.1.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v1.0.0...fishsense_core-v1.1.0) (2026-04-20)
+
+
+### Features
+
+* export fish segmentation ([c012e11](https://github.com/UCSD-E4E/fishsense-core/commit/c012e11cd03b49be4ff79c9dd88cbcd4b68c67be))
+
+
+### Bug Fixes
+
+* pylint errors ([a60bd33](https://github.com/UCSD-E4E/fishsense-core/commit/a60bd33d4841c49ea5949a12b5cfbb341b37bb48))
+
 ## [1.0.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v0.8.0...fishsense_core-v1.0.0) (2026-04-14)
 
 
