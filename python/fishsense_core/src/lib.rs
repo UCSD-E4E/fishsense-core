@@ -1,3 +1,4 @@
+mod fish;
 mod laser;
 
 use pyo3::prelude::*;
@@ -9,6 +10,10 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Both inits are idempotent (errors are silently ignored so re-import is safe).
     let _ = tracing_log::LogTracer::init();
     pyo3_log::init();
+
+    let fish_mod = PyModule::new(py, "fish")?;
+    fish::register(py, &fish_mod)?;
+    m.add_submodule(&fish_mod)?;
 
     let laser_mod = PyModule::new(py, "laser")?;
     laser::register(py, &laser_mod)?;
