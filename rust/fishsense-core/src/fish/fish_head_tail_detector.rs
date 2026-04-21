@@ -580,6 +580,59 @@ mod tests {
         );
     }
 
+    /// Regression: on a real fish mask the classifier used to return endpoint
+    /// positions close to the labelled snout/fork but with head and tail
+    /// *swapped* — the point returned as `head` lands on the fork and vice
+    /// versa. Fixture at `tests/fixtures/head_tail_concavity_swap/` (fish
+    /// facing LEFT: snout at the left end, fork at the right). Asserts
+    /// each returned endpoint is within `TOL` of its labelled keypoint.
+    #[test]
+    fn test_find_head_tail_img_head_tail_not_swapped() {
+        use ndarray_npy::read_npy;
+        use std::path::PathBuf;
+
+        const TOL_PX: f32 = 80.0;
+
+        let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/head_tail_concavity_swap");
+        let mask: Array2<u8> =
+            read_npy(fixture_dir.join("mask.npy")).expect("mask.npy should load");
+
+        // Labelled keypoints (from coords.json, [x, y] pixel coords).
+        let snout = [298.7084_f32, 907.3973];
+        let fork = [1778.1605_f32, 817.2211];
+
+        let detector = FishHeadTailDetector {};
+        let coords = detector
+            .find_head_tail_img(&mask)
+            .expect("detector should succeed on fixture mask");
+
+        let dist = |a: [f32; 2], b: [f32; 2]| -> f32 {
+            ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt()
+        };
+
+        let head = [coords.head.0[0], coords.head.0[1]];
+        let tail = [coords.tail.0[0], coords.tail.0[1]];
+
+        let head_to_snout = dist(head, snout);
+        let head_to_fork = dist(head, fork);
+        assert!(
+            head_to_snout < head_to_fork,
+            "head/tail swapped: head={head:?} is closer to fork {fork:?} ({head_to_fork:.1} px) \
+             than to snout {snout:?} ({head_to_snout:.1} px)"
+        );
+
+        let tail_to_fork = dist(tail, fork);
+        assert!(
+            head_to_snout <= TOL_PX,
+            "head {head:?} is {head_to_snout:.1} px from labelled snout {snout:?} (tol {TOL_PX})"
+        );
+        assert!(
+            tail_to_fork <= TOL_PX,
+            "tail {tail:?} is {tail_to_fork:.1} px from labelled fork {fork:?} (tol {TOL_PX})"
+        );
+    }
+
     /// When the depth component covers only the centre of the mask, snapping
     /// must pull the endpoints inward relative to the raw image coordinates.
     /// This verifies that `find_head_tail_depth` ≠ `find_head_tail_img` when

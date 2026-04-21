@@ -96,6 +96,12 @@ pub fn extract_perimeter(mask: &Array2<u8>) -> Vec<[f64; 2]> {
 
 // ── geometry helpers ──────────────────────────────────────────────────────
 
+/// Fraction of a polygon half's area below which a concavity is treated as
+/// mask noise. Used by both the head/tail classifier
+/// ([`min_concavity_distance_to_point`]) and the tail corrector
+/// ([`correct_tail`]).
+const FORK_MIN_AREA_FRACTION: f64 = 0.01;
+
 /// Builds a `geo::Polygon` from an ordered perimeter in `[col, row]` order.
 pub fn polygon_from_perimeter(perimeter: &[[f64; 2]]) -> Polygon<f64> {
     let coords: Vec<(f64, f64)> = perimeter.iter().map(|p| (p[0], p[1])).collect();
@@ -175,27 +181,39 @@ pub fn split_polygon(
     (clip(&half_left), clip(&half_right))
 }
 
-/// Distance from `point` to the boundary of `poly`'s largest concavity.
+/// Minimum distance from `point` to the boundary of any significant concavity
+/// of `poly`.
 ///
 /// "Concavity" here means a piece of `convex_hull(poly) - poly` — the regions
-/// the hull bridges over. Returns `INFINITY` when the half is convex.
+/// the hull bridges over. Concavities smaller than [`FORK_MIN_AREA_FRACTION`]
+/// of `poly`'s area are treated as mask noise and excluded. Returns
+/// `INFINITY` when no significant concavity exists (or the half is convex).
 ///
 /// A caudal fork's tips sit on the hull, *at vertices of the fork-notch
 /// concavity*, so for the fork-side half this distance is ≈ 0. A snout tip
-/// sits on the hull but nowhere near any concavity, so for the snout-side half
-/// this distance is large. This is the tail-vs-head discriminator used by
-/// [`classify_from_perimeter`].
-fn largest_concavity_distance_to_point(poly: &Polygon<f64>, point: [f64; 2]) -> f64 {
+/// sits on the hull but nowhere near any real concavity, so for the
+/// snout-side half this distance is large (or infinite). This is the
+/// tail-vs-head discriminator used by [`classify_from_perimeter`].
+///
+/// Previously this returned the distance to the *largest* concavity. On a
+/// real fish the largest concavity in the fork-side hull-difference is the
+/// broad bay around the caudal peduncle, not the fork notch — its apex can
+/// sit ~100 px from the PCA fork endpoint. Meanwhile a small mask-noise
+/// pocket near the snout can sit ~14 px from the PCA snout endpoint, so
+/// "largest concavity" picked the wrong half as tail. Filtering by minimum
+/// area and taking the minimum distance keeps the fork signal (any of the
+/// fork side's several significant concavities is finite; a clean snout
+/// half has none) while rejecting sub-threshold noise.
+fn min_concavity_distance_to_point(poly: &Polygon<f64>, point: [f64; 2]) -> f64 {
     let hull: Polygon<f64> = poly.convex_hull();
     let diff: MultiPolygon<f64> = hull.difference(poly);
-    let Some(largest) = diff.0.iter().max_by(|a, b| {
-        a.unsigned_area()
-            .partial_cmp(&b.unsigned_area())
-            .unwrap_or(std::cmp::Ordering::Equal)
-    }) else {
-        return f64::INFINITY;
-    };
-    dist_pt_line(Point::new(point[0], point[1]), largest.exterior())
+    let min_area = poly.unsigned_area() * FORK_MIN_AREA_FRACTION;
+    let pt = Point::new(point[0], point[1]);
+    diff.0
+        .iter()
+        .filter(|c| c.unsigned_area() >= min_area)
+        .map(|c| dist_pt_line(pt, c.exterior()))
+        .fold(f64::INFINITY, f64::min)
 }
 
 /// Nearest point on `poly`'s exterior boundary to `query`.
@@ -270,8 +288,8 @@ pub fn classify_from_perimeter(
         (&half1, &half0)
     };
 
-    let d_left = largest_concavity_distance_to_point(left_half, left);
-    let d_right = largest_concavity_distance_to_point(right_half, right);
+    let d_left = min_concavity_distance_to_point(left_half, left);
+    let d_right = min_concavity_distance_to_point(right_half, right);
 
     let (head, tail) = if d_left <= d_right {
         (right, left)
@@ -342,10 +360,6 @@ pub fn correct_head(
     [nearest.x(), nearest.y()]
 }
 
-/// Fraction of `tail_half.unsigned_area()` below which a concavity is treated
-/// as mask noise and excluded from the fork-apex search.
-const FORK_MIN_AREA_FRACTION: f64 = 0.01;
-
 /// Refines the tail endpoint (port of `correct_tail_coord`).
 ///
 /// Takes the convex-hull difference of `tail_half` (which yields every
@@ -401,10 +415,22 @@ pub fn correct_tail(
             da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
         });
 
+    // A real fork notch is a small local feature of the caudal fin: its apex
+    // sits within a few percent of the fish's length of the raw PCA tail (the
+    // PCA tail itself is on the notch's boundary). If the best above-threshold
+    // concavity's apex is far from the raw tail, no real fork notch passed
+    // the area filter — don't snap onto an unrelated broad concavity.
+    const MAX_APEX_SNAP_FRACTION: f64 = 0.15;
+    let max_snap = len * MAX_APEX_SNAP_FRACTION;
+
     match chosen {
         Some(c) => {
             let apex = nearest_on_boundary(c, head_extended);
-            [apex.x(), apex.y()]
+            if Euclidean::distance(tail_pt, apex) > max_snap {
+                tail
+            } else {
+                [apex.x(), apex.y()]
+            }
         }
         None => tail,
     }
