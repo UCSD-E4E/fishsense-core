@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v1.2.0...fishsense_core-v1.3.0) (2026-04-21)
+
+
+### Features
+
+* add inference_single for single-fish mask output ([ea196dd](https://github.com/UCSD-E4E/fishsense-core/commit/ea196ddeedb9c9f8a7f000a1efd35bc0a20fed79))
+
 ## [1.2.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v1.1.0...fishsense_core-v1.2.0) (2026-04-20)
 
 

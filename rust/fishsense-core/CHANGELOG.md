@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.3.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v1.2.0...fishsense-core-v1.3.0) (2026-04-21)
+
+
+### Features
+
+* add inference_single for single-fish mask output ([ea196dd](https://github.com/UCSD-E4E/fishsense-core/commit/ea196ddeedb9c9f8a7f000a1efd35bc0a20fed79))
+
+
+### Bug Fixes
+
+* classify head/tail by concavity proximity, not total area ([c5b686c](https://github.com/UCSD-E4E/fishsense-core/commit/c5b686c55f29ff551c45c377f716b1fd80884fe3))
+* head/tail endpoint snap and boundary-min orientation ([a287305](https://github.com/UCSD-E4E/fishsense-core/commit/a2873051328299d5b119c49a16b6911ba63339f4))
+* head/tail orientation via peduncle + hull-area cascade ([65731fb](https://github.com/UCSD-E4E/fishsense-core/commit/65731fb1008064ac7fd01848c76d6d53439e2669))
+* pick nearest significant concavity, not largest, for head/tail ([a935d56](https://github.com/UCSD-E4E/fishsense-core/commit/a935d56191dd2d357eec61f09148ff13c2c74b1a))
+
 ## [1.2.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v1.1.0...fishsense-core-v1.2.0) (2026-04-20)
 
 
