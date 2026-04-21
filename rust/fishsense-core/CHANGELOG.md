@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v1.3.0...fishsense-core-v1.4.0) (2026-04-21)
+
+
+### Features
+
+* add coreml feature and gate optimization level for iOS ([10680ef](https://github.com/UCSD-E4E/fishsense-core/commit/10680efeadd34bfac6433eb10d7668c1d317fede))
+
 ## [1.3.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v1.2.0...fishsense-core-v1.3.0) (2026-04-21)
 
 
