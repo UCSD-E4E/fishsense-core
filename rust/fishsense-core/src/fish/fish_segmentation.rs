@@ -83,9 +83,22 @@ impl FishSegmentation {
     }
 
     fn create_model() -> Result<Session, ort::Error> {
-        let mut builder = Session::builder()?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(4)?;
+        let builder = Session::builder()?.with_intra_threads(4)?;
+
+        // iOS enforces W^X, which blocks the runtime kernel fusion that
+        // Level3 performs (causes EXC_BAD_ACCESS code=50). Level1 does only
+        // ahead-of-time-safe optimizations.
+        #[cfg(target_os = "ios")]
+        let builder = builder.with_optimization_level(GraphOptimizationLevel::Level1)?;
+        #[cfg(not(target_os = "ios"))]
+        let builder = builder.with_optimization_level(GraphOptimizationLevel::Level3)?;
+
+        #[cfg(feature = "coreml")]
+        let builder = builder.with_execution_providers([
+            ort::execution_providers::CoreMLExecutionProvider::default().build(),
+        ])?;
+
+        let mut builder = builder;
         builder.commit_from_memory(MODEL_BYTES)
     }
 

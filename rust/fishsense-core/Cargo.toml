@@ -5,6 +5,9 @@ edition = "2024"
 build = "build.rs"
 
 [features]
+default = ["download-binaries"]
+download-binaries = ["ort/download-binaries", "ort/tls-rustls"]
+coreml = ["ort/coreml"]
 tracing-init = ["dep:tracing-subscriber"]
 
 [dev-dependencies]
@@ -26,7 +29,7 @@ nalgebra = "0.33"
 ndarray = "0.17.1"
 ndarray-linalg = { version = "0.18.0", features = ["openblas-system"] }
 opencv = { version = "0.98", default-features = false, features = ["imgproc"] }
-ort = { version = "2.0.0-rc.12", features = ["download-binaries"] }
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["ndarray"] }
 thiserror = "2.0.17"
 tracing = "0.1"
 wgpu = "29.0.1"
