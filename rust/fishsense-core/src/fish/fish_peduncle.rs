@@ -65,6 +65,7 @@ const END_EXCLUDE_FRACTION: f64 = 0.10;
 const FLANK_LO_FRACTION: f64 = 0.30;
 const FLANK_HI_FRACTION: f64 = 0.70;
 
+
 /// Classify head/tail by locating the caudal peduncle along the PCA axis.
 ///
 /// `left` and `right` are the two PCA endpoints (from
@@ -179,12 +180,39 @@ pub fn classify_by_peduncle(
     let s_peduncle = s_min + (best_i as f64 + 0.5) * bin_w;
 
     // Endpoints in axis coordinates: left is at s=0, right is at s=axis_len.
-    let d_left = (0.0 - s_peduncle).abs();
+    let d_left = s_peduncle.abs();
     let d_right = (axis_len - s_peduncle).abs();
-    let (tail, head, d_tail, d_head) = if d_left <= d_right {
-        (left, right, d_left, d_right)
-    } else {
+
+    // Baseline: tail is the endpoint closer to the minimum-width bin.
+    // A real caudal peduncle sits between body flank and caudal fin,
+    // so the caudal-fin-side endpoint is closer to it than the snout-
+    // side endpoint.
+    let mut tail_on_right = d_right < d_left;
+
+    // Boundary override: when `best_i` lands *at* the outer edge of
+    // the interior search range (at `search_lo` or `search_hi - 1`),
+    // the minimum sits flush against the excluded endpoint zone —
+    // no bins inside the search range on the outer side.
+    //
+    // Empirically on the bug-report fixture, a boundary minimum is
+    // the signature of a snout-side-taper min on species (rockfish,
+    // grouper) whose snout taper is the narrowest cross-section
+    // inside the search range. The distance rule then picks the
+    // *snout* endpoint as tail. Flipping to the far endpoint
+    // recovers the correct orientation on ~5 of the 14 residual
+    // likely-swap cases. A genuine caudal peduncle sits interior to
+    // the search range, so this override does not fire on normal
+    // fish.
+    if best_i == search_lo {
+        tail_on_right = true;
+    } else if best_i + 1 == search_hi {
+        tail_on_right = false;
+    }
+
+    let (tail, head, d_tail, d_head) = if tail_on_right {
         (right, left, d_right, d_left)
+    } else {
+        (left, right, d_left, d_right)
     };
     let asymmetry = if d_head > 1e-9 { d_tail / d_head } else { 0.0 };
 

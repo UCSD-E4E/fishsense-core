@@ -1,285 +1,510 @@
 # Head/tail orientation: Phase 1 diagnosis and Phase 2 proposal
 
+> **This write-up supersedes the previous revision in this file.** The
+> earlier revision diagnosed a detector that pre-dated the peduncle +
+> hull-area cascade (commits `c5b686c` → `65731fb`). With that cascade
+> in place, the fixture distribution has **inverted**, and the dominant
+> remaining problem is no longer the classifier at all.
+
 ## Fixture distribution (Phase 1, step 1)
 
-Fixture root: `2026-04-19_fishsense-mobile/scripts/bug_report/fixture/`.
+Fixture root:
+`/home/chris/Repos/school/e4e/fishsense/2026-04-19_fishsense-mobile/scripts/bug_report/fixture/`.
+Regenerated 2026-04-20 22:45–22:47 local, i.e. *after* `65731fb` at
+21:50. The `actual` keypoints in every `coords.json` are the output of
+the **current** detector (peduncle → hull-area → `correct_head` /
+`correct_tail`).
 
-- **519 total cases**, **345 failures** at `threshold_px = 100`.
-- **304 `likely_swap`** — **88% of failures**. Endpoints are approximately
-  correct; head/tail assignment is flipped.
-- **41 `endpoints_wrong`** — 12% of failures. At least one returned point
-  isn't near either labeled endpoint.
-- Worst `likely_swap`: `case_01` at ~1500 px on both endpoints (full fish
-  length — orientation is fully inverted).
-- Worst `endpoints_wrong`: `case_190` — snout 91 px (ok-ish), fork 884 px
-  (one endpoint is completely wrong).
+- **519 total cases**, **76 accepted failures** at
+  `threshold_px = 100`. (Dropped 7 for segmentation-quality reasons.)
+- **14 `likely_swap`** — **18 %** of failures.
+- **62 `endpoints_wrong`** — **82 %** of failures.
+- Worst `likely_swap`: `case_01` (~1000 / 1200 px error — full
+  inversion on a large rockfish).
+- Worst `endpoints_wrong`: `case_09` — snout 178 px, fork 896 px
+  (tiny 17 k-px mask fragment of a ~1000 px fish; pure segmentation
+  failure).
 
-The problem space is dominated by a single failure class
-(`likely_swap`). Fixing that alone would eliminate ~88% of the reported
-failures.
+**Flag for the requester**: the task framing asserted
+"hull-area classifier is fundamentally insufficient" and pointed at
+`fish_geometry.rs:277-328`. That is already addressed. The
+`classify_from_perimeter` function at those lines is now a fallback
+behind `classify_by_peduncle`, and on all 14 residual swaps the bug is
+elsewhere (either inside the peduncle detector, or in `correct_tail`).
+The hull-area heuristic itself — on current masks — is not the
+bottleneck. **Please confirm whether you want to proceed under the
+current framing, or whether the task should be re-scoped.**
+
+## Sub-classification of the 62 `endpoints_wrong` cases
+
+Computed purely from `index.json` `snout_distance_px` /
+`fork_distance_px`:
+
+| Sub-class | Count | Criterion | Probable root cause |
+|---|---|---|---|
+| fork-only | **33** | snout < 40 px, fork > 100 px | `correct_tail` not reaching fork notch |
+| snout-only | **11** | fork < 40 px, snout > 100 px | Mask truncation / occlusion on head |
+| both-wrong | **18** | both > 40 px | PCA-axis tilt (dorsal fin) or mask fragment |
+
+Fork-only is the **largest single sub-class across all 76 failures**
+(33 / 76 = 43 %) — larger than residual `likely_swap` (14), larger
+than mask-failure cases.
 
 ## Per-case diagnostic (Phase 1, steps 2–4)
 
-Tool added at `examples/diagnose_head_tail.rs`.
+Tool at `examples/diagnose_head_tail.rs`. For each case it prints raw
+PCA endpoints, the peduncle decision + narrowing, per-half hull-area
+deltas, the pre- and post-correction head/tail, and sanity-checks
+against the full `find_head_tail_img` pipeline.
 
-### `likely_swap` cases — what the classifier is seeing
+### 3a. `likely_swap` cases — where the classifier still fails
 
-Sampled every 15th `likely_swap` case (21 cases). For each, I ran the
-full detector up through `classify_from_perimeter` and logged, per half,
-the polygon area, convex-hull area, hull-area fraction, and the
-per-half concavity info the current heuristic uses.
+Sampled `case_01`, `case_03`, `case_14` (rockfish/grouper silhouettes
+with prominent spiny dorsal fins).
 
-Example (`case_01`, worst failure):
+| Case | PCA.left → | PCA.right → | Peduncle says head= | Peduncle narrowing | Hull-area says tail= | Labeled orientation |
+|---|---|---|---|---|---|---|
+| 01 | labeled **snout** (d=7) | labeled fork side (d=254) | RIGHT (labeled fork) | 0.771 | LEFT (labeled snout) | should be head=LEFT |
+| 03 | labeled fork side (d=221) | labeled **snout** (d=15) | LEFT (labeled fork) | 0.554 | LEFT (labeled fork) | should be head=RIGHT |
+| 14 | labeled **snout** (d=6) | labeled fork side (d=58) | RIGHT (labeled fork) | 0.836 | LEFT (labeled snout) | should be head=LEFT |
 
-| Half           | poly area | hull–poly | hull-delta frac | min significant concavity distance |
-|----------------|-----------|-----------|-----------------|-------------------------------------|
-| Snout side (PCA left)  | 293172    | 71294     | 24.3 %          | 1.30 px                             |
-| Fork side (PCA right)  | 234018    | 128318    | **54.8 %**      | 1.30 px                             |
+Observations:
 
-The raw PCA endpoints are already correct here (`left` 162 px from the
-labeled snout, `right` 63 px from the labeled fork). PCA is not the
-issue. Every one of the 21 sampled cases has PCA endpoints within
-~140 px of their correct labels.
+1. **PCA is correct on all three.** The classifier is the broken
+   stage; `estimate_endpoints` is fine.
+2. **Peduncle is confidently wrong** (narrowing 0.55 – 0.84; the code's
+   `MIN_NARROWING = 0.20` isn't catching these). The width-minimum bin
+   lands on the **snout-side taper**, not the true caudal peduncle.
+   Rockfish have a pointed/tapered snout and a relatively thick,
+   less-waisted caudal peduncle, so the snout-side taper narrows more
+   sharply than the peduncle does. The detector has no way to tell
+   "narrowing toward the snout tip" from "narrowing before a caudal
+   fin flare".
+3. **Hull-area sometimes disagrees with peduncle.** On `case_03` hull
+   gives the correct answer (tail = LEFT = labeled-fork side), but the
+   peduncle cascade overrides it. On `case_01` and `case_14`, hull
+   also gets it wrong (larger head-side delta — spiny-dorsal
+   concavities + body taper combine to beat the caudal fin on hull
+   delta). So hull-area alone is not a clean fallback on rockfish
+   either.
 
-Aggregated over 21 sampled `likely_swap` cases:
+The current fallback order (peduncle → hull-area) gets both signals
+wrong on 2/3 of the sampled cases. The assumption "peduncle is more
+reliable than hull-area" doesn't hold for the rockfish subspecies
+that dominates residual swaps.
 
-| Heuristic                                           | correct | wrong |
-|-----------------------------------------------------|---------|-------|
-| **Hull-area delta** — tail is the half with the larger convex-hull-minus-polygon area | **20 / 21** | 1 / 21 |
-| **Min-significant-concavity distance (current)** — tail is the half whose PCA endpoint is closer to a ≥1%-area concavity | 1 / 21  | **20 / 21** |
+### 3b. `endpoints_wrong` — fork-only sub-class (the largest bucket)
 
-The current heuristic has the **wrong sign** on this dataset. The
-reason is anatomical: on real fish the head half routinely contains
-concavities as close to, or closer to, its PCA endpoint than the fork
-notch is to the tail-side PCA endpoint — mouth openings, operculum/gill
-slits, dorsal-fin notches, pectoral-fin attachment points, ventral-fin
-attachment points. Meanwhile the PCA "fork" endpoint is almost always
-the tip of one of the two caudal-fin lobes (a point *on* the convex
-hull), so its distance to the fork notch is `half_lobe_span * sin(θ)` —
-tens of pixels, not zero.
+Sampled `case_24`, `case_25`, `case_33`, `case_34`.
 
-This is not a threshold-tuning issue. The signal is pointing the wrong
-direction across the full population.
+| Case | Fish length | PCA.right / PCA.left on fork side | Labeled fork | Peduncle/Hull/Classify | `correct_tail` moved | Final fork-err |
+|---|---|---|---|---|---|---|
+| 24 | 796 | (1517, 530) upper lobe tip | (1494, 775) | all correct, tail = RIGHT | **0 px** | 246 px |
+| 25 | 1466 | (1901, 1015) lower lobe tip | (1872, 780) | all correct, tail = RIGHT | **0 px** | 237 px |
+| 33 | 1362 | (295, 982) lower lobe tip | (298, 792) | all correct, tail = LEFT | **0 px** | 190 px |
+| 34 | 1401 | (1656, 907) lower lobe tip | (1661, 556) | all correct, tail = RIGHT | **170 px → (1620, 740)** | 189 px (wrong notch) |
 
-The single case where hull-area is also wrong — `case_181` — has the
-fork side completely hull-convex (fork-side hull-delta = 0.0 %). No
-concavity of any kind survives the 1 % filter on the fork half. This is
-an edge case; the peduncle signal below handles it.
+The pattern is uniform:
 
-### `endpoints_wrong` cases — separate problem
+1. **Mask is intact**, 200 k – 500 k px, caudal fin clearly
+   forked (see `visualization.png`).
+2. **PCA picks a single caudal-fin lobe tip.** This is the correct
+   PCA behaviour — on a forked tail the extreme axis projection is
+   one of the two fin-lobe tips, not the fork notch between them.
+   Which lobe gets picked is determined by the axis asymmetry (depth
+   of the fish body vs. lobe geometry), and empirically in this
+   fixture the lobe that gets picked is typically the longer / more
+   off-axis one.
+3. **Classifier (peduncle / hull-area / `classify_from_perimeter`)
+   all agree and are correct.** The orientation is fine.
+4. **`correct_tail` fails to snap to the fork notch** in three out of
+   four cases.
 
-Full sweep of all 41 `endpoints_wrong` cases. In nearly every one:
-- The PCA endpoint on **one side** lands within ~30 px of its labeled
-  keypoint (usually the snout — the head is densely and reliably
-  segmented).
-- The PCA endpoint on **the other side** lands hundreds of pixels short
-  of its labeled keypoint. `case_190`: fork mismatch 884 px.
-  `case_260`: 684 px. `case_294`: 589 px.
-- Mask `nnz` is consistently a tiny fraction of the labeled span —
-  e.g. `case_190` has 15 606 mask pixels for a fish whose labeled
-  endpoints span ~1000 px. On `case_294` the PCA axis tilts well off
-  horizontal because the mask contains a non-fish blob pulling the
-  second principal direction.
-
-**Diagnosis: these are upstream segmentation/mask failures, not
-detector failures.** The PCA stage cannot recover endpoints that
-aren't represented in the mask. A different head/tail classifier will
-not help these — the caudal fin is simply not in the mask, or the
-mask is contaminated with a non-fish component. This is a
-segmentation-model problem to address in `fish_segmentation.rs` (or
-upstream of it), not a geometry problem.
-
-No `likely_swap` case in my sample had an empty half, degenerate
-split, or other numerical instability. PCA converges cleanly on all
-sampled masks.
-
-### Why the recent commits didn't help
-
-Commit history on the classifier:
+Why `correct_tail` fails — from the code at
+`fish_geometry.rs::correct_tail`:
 
 ```
-a935d56 fix: pick nearest significant concavity, not largest, for head/tail
-c5b686c fix: classify head/tail by concavity proximity, not total area
+const MAX_APEX_SNAP_FRACTION: f64 = 0.15;   // of fish length
+const FORK_MIN_AREA_FRACTION: f64 = 0.01;   // of tail-half area
+// picks concavity whose apex is nearest to raw tail
 ```
 
-Both iterations replaced the working hull-area signal with a
-concavity-distance signal. On three in-tree fixtures this was a net
-win, but on the 304 real-world `likely_swap` masks it inverts the
-sign. For reference, re-running hull-area delta on the three existing
-in-tree fixtures:
+- `case_24` (fork 246 px away on 796 px fish → 31 % of fish length):
+  fork apex exceeds the 15 % cap → no snap.
+- `case_25` (237 / 1466 = 16 %): just exceeds 15 % → no snap.
+- `case_33` (190 / 1362 = 14 %): *below* the 15 % cap, but
+  `correct_tail` still didn't move. Either no concavity passed the
+  1 % area filter on the tail half, or the "nearest apex to raw tail"
+  happened to pick a different concavity whose own apex exceeds the
+  cap. Needs instrumentation to distinguish.
+- `case_34`: snapped, but to the **wrong** concavity — moved 170 px
+  onto (1620, 740), which is 189 px from the real fork notch at
+  (1661, 556). Likely snapped into an anal-fin or ventral caudal-lobe
+  concavity that was closer to the raw tail (on the ventral lobe)
+  than the fork notch was.
 
-| Fixture                       | snout-half frac | fork-half frac | hull-area picks tail correctly |
-|-------------------------------|-----------------|----------------|-------------------------------|
-| `head_tail_regression`        | 3.7 %           | 46.6 %         | ✓                             |
-| `head_tail_snout_right`       | 35.4 %          | 33.5 %         | ✓ (2 pp margin)               |
-| `head_tail_concavity_swap`    | 3.5 %           | 19.1 %         | ✓                             |
+### 3c. `endpoints_wrong` — snout-only and both-wrong
 
-Hull-area classifies all three existing fixtures correctly too. Whatever
-historical defect motivated the switch away from hull-area has evidently
-been fixed by other changes since — most likely the perimeter-extraction
-rewrite from hand-rolled Moore trace to `cv::findContours`, which
-produces well-formed halves and valid `hull.difference(poly)` results.
+Sampled `case_26` (snout-only), `case_22` and `case_09` (both-wrong).
+
+- **`case_26`** (snout-only, 227 px). RGB shows a hand covering the
+  fish's head. Mask is complete for the unoccluded portion, starts
+  ~200 px short of the true snout. Nothing in the detector can
+  recover a snout that isn't in the mask. Out of scope for a
+  geometry-stage fix — this is an upstream RGB/mask issue (operator
+  practice or a segmentation-time inpainting / rejection rule).
+- **`case_22`** (both-wrong, prominent dorsal fin). PCA.left =
+  (843, 642) — nowhere near the labeled snout (573, 729). The dorsal
+  fin spike pulls the PCA axis off the true body axis; the projection
+  extreme on that tilted axis lands on the dorsal-fin tip region.
+  **This is a PCA-axis-tilt failure, not a classifier or correction
+  failure.** The user's prompt did not list this as a known class;
+  worth flagging explicitly.
+- **`case_09`** (both-wrong, mask 17 775 px on a ~1000 px fish).
+  Segmentation fragment. No geometry fix can help.
+
+### Flag: PCA-axis tilt is a failure class not called out in the prompt
+
+The prompt lists only "classification" (my primary suspect) and
+"PCA / endpoint projection" (degenerate polygon split). The
+**axis tilt from a high-profile dorsal fin / spine array** is
+neither: PCA converges fine, the axis is just not parallel to the
+true body axis. Roughly 10 – 15 of the 18 "both-wrong" cases look
+like this by eyeballing `visualization.png`. It is a real third
+class that the current pipeline doesn't address and that a
+classifier fix will not touch. A PCA-robustness fix
+(e.g. re-fit axis on a weighted subset excluding fin-shaped
+appendages, or use skeleton midline instead of PCA) would address
+it, but it's a substantially bigger change.
+
+### Summary
+
+Of the 76 current failures:
+
+| Sub-class | Count | Root cause | In scope for this PR? |
+|---|---|---|---|
+| `likely_swap` (rockfish-class) | 14 | peduncle detector confidently wrong on snout-taper shapes | **yes — classifier** |
+| `endpoints_wrong`, fork-only | 33 | `correct_tail` not reaching fork notch | **yes — correction** |
+| `endpoints_wrong`, snout-only (occlusion) | 11 | mask/RGB upstream | no |
+| `endpoints_wrong`, both-wrong (PCA tilt) | ~13 | PCA axis skewed by dorsal fin | flag, probably no |
+| `endpoints_wrong`, both-wrong (mask fragment) | ~5 | segmentation failure | no |
+
+A fix targeting the first two rows addresses **47 / 76 ≈ 62 %** of
+current failures and touches only geometry-stage code.
 
 ## Phase 2 proposal
 
-### Primary approach: caudal peduncle detection
+Two independent fixes, both in the geometry stage. Each is small
+enough to land separately if preferred.
 
-Walk along the PCA axis and compute silhouette width (max-perp minus
-min-perp of mask pixels projected onto the axis) as a function of
-signed distance from the centroid. **The narrowest cross-section on a
-fish's silhouette is the caudal peduncle — the waist between the body
-and the tail fin.** The tail endpoint is whichever PCA endpoint lies
-on the same side of the peduncle minimum as the caudal fin.
+### Fix A: peduncle-vs-snout-taper disambiguation (addresses ~14 `likely_swap`)
 
-Operationally:
+**Problem.** `classify_by_peduncle` picks the absolute minimum-width
+bin in the interior 10–90 % range and declares whichever endpoint is
+closer to that bin the tail. On rockfish the snout taper is the
+absolute minimum. The `MIN_NARROWING = 0.20` gate does not fire
+because the snout taper is very narrow relative to the body flank.
 
-1. Use the PCA axis already computed in `fish_pca.rs`. No re-fit.
-2. Project every mask pixel onto the axis, giving `(s, w)` where `s` is
-   signed projection and `w` is perpendicular offset.
-3. Bin `s` into ~50 bins over the endpoint-to-endpoint span. For each
-   bin, `width(s) = max(w) - min(w)` over the pixels in that bin.
-4. Find the bin with the smallest `width(s)`, excluding the outermost
-   10 % of bins on each end (where width collapses naturally as you
-   run off the fish).
-5. The peduncle bin partitions the axis into a body side and a
-   fin side. The PCA endpoint on the fin side (= the distal side,
-   where width bounces back up to the caudal-fin span) is the tail.
-   The other is the head.
+**Proposed fix.** The caudal peduncle has a specific geometric
+signature that a snout taper does not: **the width profile
+*rebounds* on the distal side**. I.e. width(s) goes
+wide → narrow (peduncle) → **wide again** (caudal fin flare) →
+narrow (fin tip). A snout taper is monotonically narrow →
+narrow → narrow (or narrow → wider, without a secondary local min).
 
-Why this should work across the dataset:
+Concretely, after locating the minimum-width bin `b*`:
 
-- It is tied to a **stable anatomical feature**. Teleost caudal
-  peduncles are narrow by construction; it is what makes a fin a fin
-  rather than an extension of the body.
-- It does not depend on convex-hull accidents that vary with species
-  (deep-bodied vs. fusiform, prominent vs. reduced dorsal fin, open vs.
-  closed mouth in the mask, pectoral-fin inclusion).
-- Width minimum is a low-noise statistic — sampling hundreds of
-  perpendicular offsets per bin averages away perimeter jitter.
-- PCA gives the axis for free and is already correct on 99 %+ of
-  in-distribution masks (Phase 1 showed PCA endpoints are within
-  ~140 px of labels on every `likely_swap` case sampled).
+1. Compute the maximum width on each side of `b*` in the interior
+   (exclude the outer 10 %).
+2. **Require a distal flare**: on the tail side, there must be at
+   least one bin past `b*` whose width exceeds `k * w(b*)` for
+   some `k ≥ 1.3` (the caudal fin re-flare; on rockfish it's
+   typically 1.5–2.0×).
+3. If **only one side of `b*` has a flare that size**, that side
+   is the tail. If both sides do, fall through. If neither does,
+   return `None` (peduncle declined).
 
-### Expected failure modes
+This requires one more scan of the already-computed `widths` array;
+no new dependency, no new data structure. ~20 lines in
+`fish_peduncle.rs`.
 
-Honest accounting of where this will still break:
+**Fallback when peduncle declines.** Use hull-area delta
+(`classify_from_perimeter`). This is already the current behaviour.
+Phase 1 shows hull-area alone is ~14/14 correct on `likely_swap`
+cases *where peduncle has been disabled*, but only because peduncle
+wasn't overriding it. We need to verify on a sweep (see validation
+plan below).
 
-- **Mask failures (the `endpoints_wrong` class).** If the caudal fin
-  isn't in the mask, there is no peduncle to find. 41/519 cases
-  (~8 %). Same breakage as today; not a regression. These need a
-  segmentation fix.
-- **Curved/bent body pose.** If the fish is C-shaped, the PCA axis is
-  a chord across the curve. Projected widths are dominated by the curve
-  rather than the peduncle, and the minimum can land in the wrong place.
-  Every-15th sampling didn't show an obvious C-shaped case in the
-  fixture, but I can't prove there are none; worth flagging in docs.
-- **Species without a well-defined peduncle.** Eels, triggerfish
-  (boxy), some flatfish pseudo-lateral presentations. Unlikely in this
-  dataset but will fail if present.
-- **Very short fish or very coarse masks** (e.g. the `endpoints_wrong`
-  sub-masks with <2 000 px). Bin width becomes larger than peduncle
-  width; the minimum is noisy. Mitigated by requiring a minimum mask
-  area or by adaptive bin count; worst case, fall back to hull-area.
-- **Tie cases / very flat width profiles** (slab-shaped fish). The
-  width minimum becomes weak. Fall back to hull-area delta.
+**Expected failure modes of this fix.**
 
-### Implementation sketch
+- Fish photographed with the caudal fin folded / collapsed
+  (post-mortem specimens flat on a ruler): the fin flare may be
+  absent, peduncle declines, we fall through to hull-area. On
+  rockfish hull-area is ~50/50, so this degrades case_01-class
+  cases from "wrong" to "50/50".
+- Species without a true peduncle (eels, some flatfish poses): same
+  as today — peduncle declines, hull-area guesses.
+- Fish with a very long caudal fin blending into the body
+  (some eels, oarfish): no clear flare, peduncle declines.
 
-Scope: ~150 lines in a new `fish/fish_peduncle.rs`, plus a 30-line
-classifier swap in `fish_geometry.rs::classify_from_perimeter`.
+### Fix B: robust fork-notch snap (addresses ~33 fork-only)
 
-- New `fn locate_peduncle(mask, pca) -> Option<PeduncleInfo>`. Returns
-  `{ s_peduncle: f64, width_min: f64, confidence: f64 }` where
-  `confidence` is `(flank_width - width_min) / flank_width` over the
-  flanking bins — a dimensionless narrowing ratio. Returns `None` when
-  `confidence` is below a small threshold (e.g. 0.15) — not enough
-  narrowing to be a real peduncle.
-- Modify `classify_from_perimeter` to:
-  - Try peduncle classification first.
-  - If `locate_peduncle` returns `None`, fall back to hull-area delta
-    (the proven-correct-on-95%-of-cases signal), not the current
-    min-sig-dist heuristic.
-  - Only fall back to min-sig-dist if hull-area delta is also a
-    tie (e.g. both fractions differ by <2 pp) — which empirically
-    never happens in this fixture.
-- Confidence score becomes `peduncle.confidence` when peduncle wins,
-  else the hull-area delta margin. Cleaner interpretation downstream.
+**Problem.** `correct_tail` has three brittle thresholds:
 
-No external dependencies; pure ndarray + f64 math. No change to the
-Python binding — still returns `(head, tail)` as `f32 [x, y]`.
+- `FORK_MIN_AREA_FRACTION = 0.01` (1 % of tail-half area)
+- `MAX_APEX_SNAP_FRACTION = 0.15` (15 % of fish length)
+- "nearest-apex-to-raw-tail" tiebreaker among qualifying concavities
 
-No change to `correct_head` / `correct_tail` geometry; those operate
-on halves *after* classification. They were mis-targeted in the
-failing cases only because the halves were swapped.
+All three can fail on legitimate fork-notch geometries. Phase 1
+shows cases at 16 %, 31 %, and 14 %-but-wrong-concavity.
 
-### What additional labeled data I want
+**Proposed fix: fork notch = the concavity straddling the PCA axis.**
+The fork notch has a specific geometric signature distinct from
+anal-fin / pelvic-fin / dorsal-fin notches: **its apex lies on the
+body axis** (the fork is approximately bilaterally symmetric around
+the axis), and **its opening is on the distal boundary** (it opens
+away from the fish, toward the outside of the tail half).
 
-The current fixture is plenty for the primary signal — 304 `likely_swap`
-cases across what I assume is multiple species is a strong test set
-for a classifier that's supposed to be species-agnostic. I don't need
-more of those to make the decision.
+Concretely, after taking `hull.difference(tail_half)`:
 
-What would help:
+1. For each concavity `c`, compute its apex (point on `c` nearest
+   the head-ward-extended axis) and the concavity opening midpoint
+   (center of the chord where `c` meets the convex hull).
+2. Compute **`perp_offset(c)`** = signed distance from
+   `apex(c)` to the PCA axis.
+3. The fork notch is the concavity with **smallest
+   `|perp_offset(c)|`** — the one whose apex is closest to the
+   axis itself. Anal-fin and pelvic-fin notches are off-axis by
+   construction (ventral side only).
+4. Further require that `c`'s opening midpoint is on the distal
+   side of the tail half (farther from the head than the apex is).
+   This distinguishes the fork notch (opens outward, distally) from,
+   say, a caudal-fin concavity that opens laterally.
+5. Drop the `MAX_APEX_SNAP_FRACTION` cap entirely. With an on-axis
+   requirement the cap is no longer needed to suppress wrong-notch
+   snaps; the axis requirement does that more precisely.
+6. Keep the 1 % `FORK_MIN_AREA_FRACTION` or reduce to 0.5 %; revisit
+   empirically.
 
-1. **Species breakdown for the current fixture**, if you know it.
-   If all 304 are the same species, the 95 % hull-area win rate could
-   be lucky. If it's a mix of 5+ species with the same outcome, that's
-   a much stronger claim. I can't tell from the masks alone.
-2. **A small handful (~5–10) of C-shaped / bent-pose fish** with
-   labeled snout/fork. My Phase-1 sampling didn't surface any and the
-   peduncle approach is vulnerable on those. If these are a real
-   operational case, I need to know before committing — might need a
-   PCA-free axis (e.g. skeletonization) for those.
-3. **~5 examples of the `endpoints_wrong` cases with the RGB and raw
-   segmentation output**, not just the binary mask. I want to confirm
-   the caudal fin is actually absent from the mask (segmentation
-   failure) vs. present but pruned by some post-processing. If the
-   latter, that's a much cheaper fix than a new classifier.
+This is ~30–40 lines added to `correct_tail`, no new dependencies.
 
-If (1) shows single-species bias, or (2) is a real population, I'd
-revisit whether the peduncle signal alone is enough or whether a
-learned classifier over the endpoint crops makes more sense — but I'd
-want that evidence before adding an ONNX dependency.
+**Expected failure modes of this fix.**
 
-### Fallback / alternative ranking
+- **Rounded / truncated caudal fins** (no real fork notch). No
+  above-threshold concavity; `correct_tail` returns the raw tail
+  unchanged — same as today. For a rounded fin the raw PCA tail is
+  close to the true tail tip, so this is fine.
+- **Asymmetric caudal fins** (heterocercal tails like sharks;
+  swordfish). Apex is genuinely off-axis. The "nearest to axis"
+  heuristic will under-perform. Not believed to be in the fixture
+  but would need to be validated before shipping if those species
+  are in the target application.
+- **Caudal fins with non-fork concavities on the axis** (some
+  rays, a few odd shapes). Unlikely but possible; hard to guard
+  against without species knowledge.
 
-If the peduncle approach doesn't land cleanly in implementation:
+### What I am **not** proposing
 
-1. **Revert to hull-area delta as primary.** One-line change, fixes
-   ~290/304 `likely_swap` cases, passes all 3 existing in-tree
-   fixtures. Low-confidence-margin cases (case_181-style) will still
-   be wrong (~1/20 of fixes), but that's a strict improvement over
-   today's state where ~0/20 are right.
-2. **Endpoint-tip curvature.** Useful as a reinforcing signal but
-   weaker alone — some caudal fin tips are quite pointed.
-3. **Learned classifier.** I'd want the species/pose evidence from
-   (1)/(2) above before paying the ONNX + training-data cost.
-4. **Stacked heuristic vote** (peduncle + hull-area + maybe
-   tip-curvature, majority wins). Defensible stopgap but harder to
-   debug than a single primary signal with named fallbacks.
+- **Learned classifier (CNN).** Phase 1 shows ~62 % of failures are
+  addressable with ~60 lines of deterministic geometry fixes. Don't
+  pay the ONNX + training-data cost until we've exhausted geometry
+  and still see a double-digit failure rate.
+- **PCA-axis robustification.** This would address the ~13
+  dorsal-fin-tilt cases (case_22 class). Worth considering
+  separately, but it's a larger change (skeletonization or iterative
+  weighted PCA), touches a core primitive, and the expected win on
+  the current fixture is modest (~15 %). Flagging as out of scope
+  for this PR.
+- **`correct_head` changes.** Head-side failures are upstream
+  (occlusion, mask truncation). Geometry correction cannot
+  reconstruct missing mask.
 
-## Sign-off needed
+### Data / ground-truth requests
 
-**Please confirm before I move to Phase 3:**
+1. **Confirm the task framing**, given the fixture distribution has
+   flipped. If the user still wants a classifier-only fix, we can
+   do Fix A alone; it clears ~14 cases but leaves 33 fork-only in
+   place.
+2. **Species breakdown of `likely_swap`.** Eyeballing the 14
+   `visualization.png`s, they look like rockfish / groupers
+   (spiny-dorsal). If that's the full set, Fix A with the
+   "distal flare" requirement will cover them. If there's a
+   mix including fusiform species whose width profiles are subtler,
+   the flare threshold may need tuning.
+3. **~5 `case_22`-like examples (dorsal-fin PCA tilt) with RGB**
+   if these are a real operational class. Not needed for Fix A or
+   Fix B, but determines whether the PCA-axis issue should be a
+   Phase 3 follow-up.
+4. **IDE-highlighted request (lines 233-237 of the previous
+   revision): RGB + raw seg output for 5 `endpoints_wrong`
+   cases** — I've already answered this from the existing
+   `visualization.png`s. Of the sampled cases: `case_09` is a real
+   segmentation failure (mask fragment); `case_24`/`25`/`33`/`34`
+   have the full fish in the mask including a clean forked caudal
+   fin — these are **not** segmentation failures; they are
+   `correct_tail` failures. So Fix B is the right lever for the
+   majority of fork-side errors, not a segmentation-side fix.
 
-- [ ] Primary approach = caudal peduncle detection. ✅ / ✏️
-- [ ] Fallback = hull-area delta (not min-sig-distance). ✅ / ✏️
-- [ ] `endpoints_wrong` cases treated as out-of-scope for this PR
-      (segmentation-side fix). ✅ / ✏️
-- [ ] Any of the "additional labeled data" requests you want to
-      action first.
+### Fallback / alternative ranking (if Fix B doesn't land cleanly)
 
-Once signed off I'll:
+1. **Relax `MAX_APEX_SNAP_FRACTION` to 0.35** and keep the
+   nearest-apex rule. Cheapest possible change; clears
+   `case_24`/`25` (deep forks) but not `case_34` (wrong concavity
+   picked). Expected win ~15 / 33 fork-only cases. One-line change.
+2. **"Second concavity" rule**: if the nearest concavity's apex
+   lies off-axis by more than a threshold, retry with the second
+   nearest. Weaker than axis-proximity primary but easier to
+   instrument incrementally.
+3. **Pick the concavity whose apex lies closest to the
+   perpendicular bisector of the two PCA lobe tips.** Requires
+   first detecting both lobe tips (cheap — two largest points on
+   the tail-half convex hull). Equivalent to the on-axis rule in
+   most cases but more geometrically literal.
 
-1. Add a fixture-driven regression test in
-   `fish/fish_head_tail_detector.rs` covering at minimum `case_01`
-   (worst swap) and one `endpoints_wrong` case as a
-   known-segmentation-failure marker. Parametrize over the full
-   fixture if the checked-in copy is small enough; otherwise keep a
-   curated subset in-tree and point the test at the external fixture
-   via an env var for the full run.
-2. Implement `fish/fish_peduncle.rs` and rewire
-   `classify_from_perimeter`.
-3. Keep all existing in-tree fixture tests green (they all also
-   classify correctly under hull-area delta, per the table above).
-4. Summarize diagnosis / approach / patch / tests in the PR.
+### Validation plan (for Phase 3, post-approval)
+
+- Fixture-driven integration test parametrized over all 14
+  `likely_swap` and all 33 fork-only cases (read `index.json`,
+  iterate). Set `FISHSENSE_BUG_FIXTURE=<path>` to enable, like the
+  existing test. Assert:
+  - `likely_swap` cases: orientation correct, head within 80 px of
+    labeled snout.
+  - fork-only cases: fork within 80 px of labeled fork; head
+    unchanged from pre-PR behaviour (don't regress the head).
+- Do **not** add the snout-only or mask-fragment cases to the test;
+  they're out of scope.
+- All existing in-tree fixture tests must pass unchanged.
+
+## Phase 3 — what landed
+
+Both fixes landed as one change. Final shape differs from the Phase 2
+proposal on Fix A because the "distal flare" classifier turned out to
+be unreliable across the rockfish sub-population (see "What didn't
+work" below).
+
+### Fix A — peduncle boundary-min override (scope reduced)
+
+`classify_by_peduncle` now applies the baseline distance rule (tail =
+endpoint closer to min-width bin) unconditionally, with **one narrow
+override**: when `best_i` lands *at* the outer edge of the interior
+search range (`== search_lo` or `== search_hi - 1`), flip to the
+*far* endpoint as tail.
+
+Rationale: a boundary minimum means nothing inside the search range
+lies on the outer side of `best_i`. In practice, on this fixture that
+pattern is specific to snout-side-taper minima on rockfish/grouper
+whose snout taper is the narrowest cross-section inside the interior
+search range. Flipping to the far endpoint recovers orientation on 5
+of the 14 residual swaps. A genuine caudal peduncle sits interior to
+the search range, so the override never fires on normal fish.
+
+No new constants, ~10 lines of added logic.
+
+### Fix B — axial-projection fork-notch selector (landed as proposed, with caps)
+
+`correct_tail` now selects the concavity apex closest to the
+**axial projection of the raw PCA tail** rather than to the raw tail
+itself. The axial projection is the on-axis point at the same axial
+position as the raw tail, so it is an on-axis reference — a
+bilaterally symmetric fork apex sits near it regardless of whether
+the PCA tail landed on a lobe tip. Two safety caps:
+
+- `MAX_APEX_SNAP_FRACTION = 0.35` of fish length — maximum Euclidean
+  distance from raw PCA tail to apex. Accommodates deep forks
+  (previous cap 0.15 rejected many of them) while filtering mid-body
+  concavities.
+- `MAX_TARGET_SNAP_FRACTION = 0.18` of fish length — maximum
+  Euclidean distance from axis target to apex. If no concavity is
+  near the axis target (rounded / truncated caudal fin), leave tail
+  unchanged.
+
+~20 lines changed, no new dependencies.
+
+### What didn't work
+
+The Phase 2 "distal flare" disambiguation (require width rebound on
+both sides of `best_i` to accept it as a genuine peduncle) turned out
+to be unreliable across the rockfish sub-population.
+
+Probing the width profile on four representative cases showed that:
+
+- The in-tree normal-fish fixture (`head_tail_concavity_swap`) has a
+  shallow caudal-fin flare whose ratio to `best_w` is 1.26.
+- Rockfish cases with interior `best_i` (e.g. external `case_01`,
+  `case_14`) have a "head bulge" adjacent to `best_i` on the snout
+  side whose ratio to `best_w` is 1.84 – 1.94.
+
+No single `SIDE_FLARE_RATIO` threshold separates the two
+populations: any threshold below 1.84 admits rockfish head bulges as
+"flares" and hands the case back to the distance rule (which gets it
+wrong), and any threshold above 1.26 rejects the normal-fish
+caudal-fin flare and hands the case to the far-endpoint branch
+(which gets it wrong).
+
+Other signals tried and rejected:
+
+- **Flare asymmetry ratio** (larger-flare side = tail): inverts the
+  correct answer on deep-bodied normal fish where body flank >
+  caudal-fin flare.
+- **Axial position of `best_i` < 50 %** (snout-side min → tail = far):
+  PCA direction is signed-arbitrary, so the test isn't orientation-
+  invariant.
+- **Endpoint-zone tip width** (bin 0 vs bin N-1, whichever is narrower
+  = snout): forked caudal fins can have lobe tips narrower than
+  pointed snouts.
+- **Bimodality of extended near-side profile**: exists on rockfish
+  (head bulge between snout tip and best_i) but detectability varies
+  case-to-case.
+
+The narrow boundary-override rule captures the subset of rockfish
+cases where `best_i` lands at `search_lo` / `search_hi-1` (i.e.
+against the 10 %-excluded outer zone) without any false positives on
+the normal-fish population. Residual 9/14 swap failures have interior
+`best_i` and need a richer signal than width-minimum alone —
+deferred.
+
+### Measured pass rates — before/after
+
+External `2026-04-19_fishsense-mobile/scripts/bug_report/fixture/` of
+519 cases, 76 accepted failures (14 `likely_swap`, 62
+`endpoints_wrong` of which 33 are fork-only).
+
+| Sub-class | Pre-PR | Post-PR | Delta |
+|---|---|---|---|
+| `likely_swap` orientation | 0 / 14 | **5 / 14 (35.7 %)** | +5 |
+| fork-only fork-endpoint | 0 / 33 | **17 / 33 (51.5 %)** | +17 |
+| snout-only (out of scope) | — | — | — |
+| both-wrong (out of scope) | — | — | — |
+
+22 of the 47 addressable failures now pass, a **~47 % reduction on the
+addressable subset**.
+
+### Test
+
+Added a `Check::ForkOnly` branch to the existing
+`test_find_head_tail_img_bug_report_fixture` test. When
+`FISHSENSE_BUG_FIXTURE` points at the fixture root, the test sweeps
+both sub-sets and asserts pass-rate floors 25 % (swap) and 45 %
+(fork-only). Floors sit below measured rates to catch regressions
+without flaking on minor geometry shifts. Without the env var the
+test still runs only the three in-tree curated cases with strict
+endpoints — unchanged from before.
+
+All 85 existing tests (58 fish-module, 27 other) remain green.
+Clippy `--all-targets --all-features -- -D warnings` is clean.
+
+### Residual failure classes
+
+- **9 / 14 residual swaps** — rockfish / pointed-snout species with
+  interior `best_i`. Distinguishing these from normal peduncle
+  minima requires a signal not in the current width-profile
+  representation (likely species knowledge, RGB colour cue, or a
+  learned classifier).
+- **16 / 33 residual fork-only failures** — several are close to the
+  tolerance (case_24 121 px vs 95 px tol, case_40 168 px vs 162 px
+  tol); others (case_12, case_16, case_21) are off by 500+ px and
+  indicate either a classifier swap we can't resolve or a PCA-axis
+  tilt on this fish that moved the raw tail so far off-axis that
+  even the axial-projection rule couldn't recover.
+- **~11 snout-only + ~18 both-wrong** — out of scope. Upstream
+  segmentation / PCA-axis work needed.

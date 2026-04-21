@@ -363,20 +363,35 @@ pub fn correct_head(
 
 /// Refines the tail endpoint (port of `correct_tail_coord`).
 ///
-/// Takes the convex-hull difference of `tail_half` (which yields every
-/// concavity in the caudal-fin silhouette), drops concavities smaller than
-/// [`FORK_MIN_AREA_FRACTION`] of the half's area, and snaps the tail to the
-/// head-ward apex of the concavity whose apex lies nearest the raw tail —
-/// the fork vertex for a forked caudal fin. When `tail_half` has no
-/// significant concavities (rounded / pointed caudal fin) the tail is
-/// returned unchanged.
+/// Takes the convex-hull difference of `tail_half` — yielding every
+/// concavity in the caudal-fin silhouette — drops concavities smaller
+/// than [`FORK_MIN_AREA_FRACTION`] of the half's area, and snaps the
+/// tail to the apex of the concavity **closest to the axial projection
+/// of the raw PCA tail**. The target (projected) point lies on the
+/// head→tail axis at the same axial position as the raw tail, so the
+/// selector measures distance against an on-axis reference rather than
+/// against the (often off-axis, on-a-lobe-tip) raw tail.
 ///
-/// Previously this function compared boundary-to-`extended` distances and
-/// only applied the correction if the raw tail already lay inside a
-/// concavity. For a forked caudal fin the PCA tail is the tip of one lobe
-/// (on the convex hull, not inside any concavity) and a one-pixel
-/// mask-noise pocket at that tip always beat the real fork notch on
-/// boundary-distance — so the tail never moved to the fork.
+/// Why this works: on a bilaterally symmetric forked caudal fin the
+/// fork apex is on the body axis, near the tail end. The axial
+/// projection of a lobe-tip PCA tail is an on-axis point at roughly
+/// the same axial position. So the fork apex is close to the target
+/// even when the raw PCA tail is off-axis. Anal-fin / pelvic-fin /
+/// dorsal-fin concavities are off-axis by construction, so their
+/// distance to the target is larger and they lose.
+///
+/// Two safety caps:
+/// - Apex must lie within [`MAX_APEX_SNAP_FRACTION`] * fish_length of
+///   the raw PCA tail. Filters out mid-body concavities.
+/// - Apex must lie within [`MAX_TARGET_SNAP_FRACTION`] * fish_length
+///   of the axis target. If no concavity is close to the target (e.g.
+///   rounded / truncated caudal fin with no real fork), returns the
+///   raw tail unchanged.
+///
+/// The previous 15 % raw-tail cap rejected deep forks; the new 35 %
+/// cap accommodates them. The previous "nearest apex to raw tail"
+/// selector snapped to ventral anal-fin concavities when the PCA tail
+/// sat on a ventral lobe tip — the axial-projection target avoids that.
 pub fn correct_tail(
     head: [f64; 2],
     tail: [f64; 2],
@@ -404,30 +419,40 @@ pub fn correct_tail(
 
     let min_area = tail_half.unsigned_area() * FORK_MIN_AREA_FRACTION;
 
+    // Project raw tail onto the head→tail axis. This is the on-axis
+    // point at the same axial position as the raw tail — what a
+    // bilateral-symmetric fork apex would sit near.
+    let axial_of_tail = (tail[0] - head[0]) * ux + (tail[1] - head[1]) * uy;
+    let target = Point::new(
+        head[0] + axial_of_tail * ux,
+        head[1] + axial_of_tail * uy,
+    );
+
+    const MAX_APEX_SNAP_FRACTION: f64 = 0.35;
+    const MAX_TARGET_SNAP_FRACTION: f64 = 0.18;
+    let max_apex_snap = len * MAX_APEX_SNAP_FRACTION;
+    let max_target_snap = len * MAX_TARGET_SNAP_FRACTION;
+
     let chosen = diff
         .0
         .iter()
         .filter(|p| p.unsigned_area() >= min_area)
+        .filter(|p| {
+            let apex = nearest_on_boundary(p, head_extended);
+            Euclidean::distance(tail_pt, apex) <= max_apex_snap
+        })
         .min_by(|a, b| {
             let apex_a = nearest_on_boundary(a, head_extended);
             let apex_b = nearest_on_boundary(b, head_extended);
-            let da = Euclidean::distance(tail_pt, apex_a);
-            let db = Euclidean::distance(tail_pt, apex_b);
+            let da = Euclidean::distance(target, apex_a);
+            let db = Euclidean::distance(target, apex_b);
             da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
         });
-
-    // A real fork notch is a small local feature of the caudal fin: its apex
-    // sits within a few percent of the fish's length of the raw PCA tail (the
-    // PCA tail itself is on the notch's boundary). If the best above-threshold
-    // concavity's apex is far from the raw tail, no real fork notch passed
-    // the area filter — don't snap onto an unrelated broad concavity.
-    const MAX_APEX_SNAP_FRACTION: f64 = 0.15;
-    let max_snap = len * MAX_APEX_SNAP_FRACTION;
 
     match chosen {
         Some(c) => {
             let apex = nearest_on_boundary(c, head_extended);
-            if Euclidean::distance(tail_pt, apex) > max_snap {
+            if Euclidean::distance(target, apex) > max_target_snap {
                 tail
             } else {
                 [apex.x(), apex.y()]
