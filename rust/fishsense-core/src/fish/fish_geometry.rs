@@ -27,6 +27,7 @@ fn dist_pt_line(pt: Point<f64>, line: &LineString<f64>) -> f64 {
 use ndarray::Array2;
 
 use crate::errors::FishSenseError;
+use crate::fish::fish_peduncle::classify_by_peduncle;
 
 // ── public types ─────────────────────────────────────────────────────────────
 
@@ -181,41 +182,6 @@ pub fn split_polygon(
     (clip(&half_left), clip(&half_right))
 }
 
-/// Minimum distance from `point` to the boundary of any significant concavity
-/// of `poly`.
-///
-/// "Concavity" here means a piece of `convex_hull(poly) - poly` — the regions
-/// the hull bridges over. Concavities smaller than [`FORK_MIN_AREA_FRACTION`]
-/// of `poly`'s area are treated as mask noise and excluded. Returns
-/// `INFINITY` when no significant concavity exists (or the half is convex).
-///
-/// A caudal fork's tips sit on the hull, *at vertices of the fork-notch
-/// concavity*, so for the fork-side half this distance is ≈ 0. A snout tip
-/// sits on the hull but nowhere near any real concavity, so for the
-/// snout-side half this distance is large (or infinite). This is the
-/// tail-vs-head discriminator used by [`classify_from_perimeter`].
-///
-/// Previously this returned the distance to the *largest* concavity. On a
-/// real fish the largest concavity in the fork-side hull-difference is the
-/// broad bay around the caudal peduncle, not the fork notch — its apex can
-/// sit ~100 px from the PCA fork endpoint. Meanwhile a small mask-noise
-/// pocket near the snout can sit ~14 px from the PCA snout endpoint, so
-/// "largest concavity" picked the wrong half as tail. Filtering by minimum
-/// area and taking the minimum distance keeps the fork signal (any of the
-/// fork side's several significant concavities is finite; a clean snout
-/// half has none) while rejecting sub-threshold noise.
-fn min_concavity_distance_to_point(poly: &Polygon<f64>, point: [f64; 2]) -> f64 {
-    let hull: Polygon<f64> = poly.convex_hull();
-    let diff: MultiPolygon<f64> = hull.difference(poly);
-    let min_area = poly.unsigned_area() * FORK_MIN_AREA_FRACTION;
-    let pt = Point::new(point[0], point[1]);
-    diff.0
-        .iter()
-        .filter(|c| c.unsigned_area() >= min_area)
-        .map(|c| dist_pt_line(pt, c.exterior()))
-        .fold(f64::INFINITY, f64::min)
-}
-
 /// Nearest point on `poly`'s exterior boundary to `query`.
 fn nearest_on_boundary(poly: &Polygon<f64>, query: Point<f64>) -> Point<f64> {
     match poly.exterior().closest_point(&query) {
@@ -228,9 +194,8 @@ fn nearest_on_boundary(poly: &Polygon<f64>, query: Point<f64>) -> Point<f64> {
 
 /// Classifies which of `left`/`right` is the fish head vs. tail.
 ///
-/// Extracts the perimeter from `mask`, builds the two polygon halves, and
-/// assigns head/tail by comparing their convex-hull-difference areas
-/// (larger difference → tail, more concave).
+/// Delegates to [`classify_orientation`]: caudal-peduncle detection first,
+/// convex-hull-area delta as a fallback.
 pub fn classify(
     mask: &Array2<u8>,
     left: [f64; 2],
@@ -242,22 +207,60 @@ pub fn classify(
             "perimeter has fewer than 3 points — cannot classify endpoints"
         )));
     }
-    classify_from_perimeter(&perimeter, left, right)
+    classify_orientation(mask, &perimeter, left, right)
 }
 
-/// Core classification logic given an already-extracted perimeter.
+/// Top-level head/tail classifier. Cascades two independent signals:
 ///
-/// Splits the polygon with the perpendicular bisector of `left`–`right`, then
-/// asks of each half: how close does its PCA endpoint sit to its largest
-/// concavity? A fork tip is a vertex of the fork-notch concavity, so the fork
-/// side's distance is ≈ 0; a snout tip has no concavity nearby. The endpoint
-/// with the smaller distance is the tail.
+/// 1. **Caudal peduncle detection** ([`classify_by_peduncle`]). Walks the
+///    PCA axis and locates the minimum silhouette width, which on any
+///    ordinary teleost is the peduncle (the narrow waist between body
+///    and caudal fin). The PCA endpoint closer to that minimum is the
+///    tail. Returns `None` on peduncle-less shapes — rectangles,
+///    tiny masks, uniformly-thick silhouettes.
 ///
-/// The previous heuristic compared the two halves' total convex-hull-minus-
-/// polygon area. That fails on fish whose head half happens to contain more
-/// concave area than the tail half — notably, fish with a prominent dorsal
-/// fin — because the dorsal-fin concavity outweighs the caudal-fork notch.
-/// Downstream `correct_tail` then pulls the "tail" onto the dorsal-fin notch.
+/// 2. **Convex-hull-area delta** ([`classify_from_perimeter`]).
+///    Used when peduncle detection declines. The tail half has more
+///    hull-area slack because the forked caudal fin creates a large
+///    notch concavity that the hull bridges over, while the head half
+///    is relatively compact.
+///
+/// We dropped the per-endpoint-nearest-concavity-distance heuristic
+/// previously used here: it had the wrong sign on the
+/// bug-report-fixture population (head-side concavities — mouth,
+/// operculum, dorsal-fin notches — sit at or very near the PCA snout
+/// endpoint, while the PCA fork endpoint sits on a caudal-fin lobe tip
+/// tens of pixels off the fork notch itself).
+pub fn classify_orientation(
+    mask: &Array2<u8>,
+    perimeter: &[[f64; 2]],
+    left: [f64; 2],
+    right: [f64; 2],
+) -> Result<ClassifiedEndpoints, FishSenseError> {
+    if let Some(d) = classify_by_peduncle(mask, left, right) {
+        // Map narrowing ∈ [MIN_NARROWING, 1.0] → confidence ∈ [0.6, 1.0]
+        // conservatively; clamp for safety.
+        let confidence = (0.5 + d.narrowing * 0.5).clamp(0.5, 1.0);
+        return Ok(ClassifiedEndpoints {
+            head: d.head,
+            tail: d.tail,
+            confidence,
+        });
+    }
+    classify_from_perimeter(perimeter, left, right)
+}
+
+/// Fallback classifier: convex-hull-area delta between the two halves.
+///
+/// Splits the polygon with the perpendicular bisector of `left`–`right`,
+/// then compares `hull_area(half) - area(half)` for each side. The half
+/// with the larger delta is the tail: a forked caudal fin creates a
+/// large notch that the convex hull bridges over, so the hull-minus-
+/// polygon slack is much bigger on the tail half than on the head half
+/// even when the head has its own fin notches.
+///
+/// This is the fallback path used when caudal-peduncle detection
+/// declines (see [`classify_orientation`] for the full cascade).
 pub fn classify_from_perimeter(
     perimeter: &[[f64; 2]],
     left: [f64; 2],
@@ -276,9 +279,9 @@ pub fn classify_from_perimeter(
     let (perp_a, perp_b) = perpendicular_bisector(left, right, scale);
     let (half0, half1) = split_polygon(&poly, perp_a, perp_b);
 
-    // Associate each PCA endpoint with the half whose exterior it lies on.
-    // `left` and `right` are extremes along the same axis, so they land in
-    // opposite halves; testing one endpoint is enough.
+    // Associate each PCA endpoint with the half whose exterior it lies
+    // on. `left` and `right` are opposite extremes of the same axis, so
+    // they land in opposite halves; testing one endpoint suffices.
     let left_pt = Point::new(left[0], left[1]);
     let (left_half, right_half) = if dist_pt_line(left_pt, half0.exterior())
         <= dist_pt_line(left_pt, half1.exterior())
@@ -288,29 +291,27 @@ pub fn classify_from_perimeter(
         (&half1, &half0)
     };
 
-    let d_left = min_concavity_distance_to_point(left_half, left);
-    let d_right = min_concavity_distance_to_point(right_half, right);
+    let hull_delta = |half: &Polygon<f64>| -> f64 {
+        let area = half.unsigned_area();
+        let hull_area = half.convex_hull().unsigned_area();
+        (hull_area - area).max(0.0)
+    };
+    let d_left = hull_delta(left_half);
+    let d_right = hull_delta(right_half);
 
-    let (head, tail) = if d_left <= d_right {
+    // Larger hull-delta → tail (more caudal-fin-notch slack).
+    let (head, tail) = if d_left >= d_right {
         (right, left)
     } else {
         (left, right)
     };
 
-    // Confidence: how one-sided the signal is. Saturates at 1.0 when one
-    // endpoint is on a concavity and the other is far from any.
-    let confidence = if d_left.is_finite() && d_right.is_finite() {
-        let max_d = d_left.max(d_right);
-        if max_d < 1e-12 {
-            0.5
-        } else {
-            ((d_left - d_right).abs() / max_d / 2.0 + 0.5).clamp(0.5, 1.0)
-        }
-    } else if d_left.is_finite() || d_right.is_finite() {
-        // One half is convex, the other has a concavity → strong signal.
-        1.0
-    } else {
+    // Confidence: dimensionless margin between the two halves.
+    let total = d_left + d_right;
+    let confidence = if total < 1e-9 {
         0.5
+    } else {
+        ((d_left - d_right).abs() / total / 2.0 + 0.5).clamp(0.5, 1.0)
     };
 
     Ok(ClassifiedEndpoints {

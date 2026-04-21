@@ -6,8 +6,8 @@ use crate::{
     errors::FishSenseError,
     fish::{
         fish_geometry::{
-            classify_from_perimeter, compute_scale, correct_head, correct_tail,
-            extract_perimeter, perpendicular_bisector, polygon_from_perimeter, split_polygon,
+            classify_orientation, compute_scale, correct_head, correct_tail, extract_perimeter,
+            perpendicular_bisector, polygon_from_perimeter, split_polygon,
         },
         fish_pca::estimate_endpoints,
     },
@@ -69,7 +69,7 @@ impl FishHeadTailDetector {
             )));
         }
 
-        let classified = classify_from_perimeter(&perimeter, left, right)?;
+        let classified = classify_orientation(mask, &perimeter, left, right)?;
         let head = classified.head;
         let tail = classified.tail;
         debug!(
@@ -631,6 +631,156 @@ mod tests {
             tail_to_fork <= TOL_PX,
             "tail {tail:?} is {tail_to_fork:.1} px from labelled fork {fork:?} (tol {TOL_PX})"
         );
+    }
+
+    /// Regression over a curated subset of the 2026-04-19 bug-report fixture.
+    /// These three cases were the motivating examples for switching the
+    /// head/tail classifier to the peduncle + hull-area-delta cascade;
+    /// they are `likely_swap` failures (PCA endpoints approximately
+    /// correct, orientation flipped under the previous classifier).
+    ///
+    /// Assertions:
+    /// - Orientation: the returned head is strictly closer to the
+    ///   labeled snout than to the labeled fork. This is the fix under
+    ///   test.
+    /// - Endpoint proximity: each endpoint lies within
+    ///   `max(80, 0.12 * fish_length)` pixels of its label.
+    ///   The scale factor matters for large fish (case_01 is ~1500 px
+    ///   long; the labeled snout and the mask's extreme pixel are
+    ///   genuinely ~160 px apart even after `correct_head`, which is a
+    ///   PCA-endpoint-precision issue, not an orientation issue).
+    ///
+    /// Set `FISHSENSE_BUG_FIXTURE=<path_to_fixture_root>` to sweep every
+    /// `likely_swap` case in the full 519-case fixture; the full-sweep
+    /// mode asserts orientation only (endpoint precision is out of
+    /// scope for this PR) and requires a ≥90 % pass rate with `case_01`
+    /// (worst failure) mandatory.
+    #[test]
+    fn test_find_head_tail_img_bug_report_fixture() {
+        use ndarray_npy::read_npy;
+        use serde_json::Value;
+        use std::path::PathBuf;
+
+        let dist = |a: [f32; 2], b: [f32; 2]| -> f32 {
+            ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt()
+        };
+
+        // Runs one case. `strict_endpoints = true` also checks endpoint
+        // proximity; `false` checks orientation only (used by the full
+        // sweep, where the goal is just to detect swap regressions).
+        let run_case = |case_dir: &std::path::Path,
+                        strict_endpoints: bool|
+         -> Result<(), String> {
+            let mask: Array2<u8> = read_npy(case_dir.join("mask.npy"))
+                .map_err(|e| format!("mask.npy load: {e}"))?;
+            let coords_raw = std::fs::read_to_string(case_dir.join("coords.json"))
+                .map_err(|e| format!("coords.json load: {e}"))?;
+            let coords: Value = serde_json::from_str(&coords_raw)
+                .map_err(|e| format!("coords.json parse: {e}"))?;
+            let snout = [
+                coords["expected"]["snout_xy"][0].as_f64().unwrap() as f32,
+                coords["expected"]["snout_xy"][1].as_f64().unwrap() as f32,
+            ];
+            let fork = [
+                coords["expected"]["fork_xy"][0].as_f64().unwrap() as f32,
+                coords["expected"]["fork_xy"][1].as_f64().unwrap() as f32,
+            ];
+            let fish_length = dist(snout, fork);
+            let endpoint_tol = 80.0_f32.max(0.12 * fish_length);
+
+            let detector = FishHeadTailDetector {};
+            let result = detector
+                .find_head_tail_img(&mask)
+                .map_err(|e| format!("detector err: {e:?}"))?;
+
+            let head = [result.head.0[0], result.head.0[1]];
+            let tail = [result.tail.0[0], result.tail.0[1]];
+            let head_to_snout = dist(head, snout);
+            let head_to_fork = dist(head, fork);
+            let tail_to_fork = dist(tail, fork);
+
+            if head_to_snout >= head_to_fork {
+                return Err(format!(
+                    "orientation: head {head:?} is {head_to_snout:.0} px from snout \
+                     vs {head_to_fork:.0} px from fork — should be closer to snout"
+                ));
+            }
+            if strict_endpoints {
+                if head_to_snout > endpoint_tol {
+                    return Err(format!(
+                        "head {head:?} is {head_to_snout:.0} px from snout \
+                         (tol {endpoint_tol:.0} = max(80, 12% of {fish_length:.0} px fish))"
+                    ));
+                }
+                if tail_to_fork > endpoint_tol {
+                    return Err(format!(
+                        "tail {tail:?} is {tail_to_fork:.0} px from fork \
+                         (tol {endpoint_tol:.0} = max(80, 12% of {fish_length:.0} px fish))"
+                    ));
+                }
+            }
+            Ok(())
+        };
+
+        if let Ok(root) = std::env::var("FISHSENSE_BUG_FIXTURE") {
+            let root = PathBuf::from(root);
+            let index_raw = std::fs::read_to_string(root.join("index.json"))
+                .expect("index.json at fixture root");
+            let index: Value = serde_json::from_str(&index_raw).expect("index.json parse");
+            let cases = index["cases"].as_array().expect("index.json cases array");
+
+            let swap_cases: Vec<&str> = cases
+                .iter()
+                .filter(|c| c["failure_mode"].as_str() == Some("likely_swap"))
+                .map(|c| c["case"].as_str().unwrap())
+                .collect();
+
+            let mut passes = 0usize;
+            let mut case_01_result: Option<Result<(), String>> = None;
+            let mut failures: Vec<(String, String)> = Vec::new();
+            for name in &swap_cases {
+                let res = run_case(&root.join(name), false);
+                if *name == "case_01" {
+                    case_01_result = Some(res.clone());
+                }
+                match res {
+                    Ok(()) => passes += 1,
+                    Err(msg) => failures.push((name.to_string(), msg)),
+                }
+            }
+            let total = swap_cases.len();
+            let rate = passes as f64 / total.max(1) as f64;
+
+            if let Some(Err(msg)) = case_01_result {
+                panic!("case_01 (worst likely_swap) must pass orientation; failed: {msg}");
+            }
+
+            println!(
+                "[bug_report_fixture] likely_swap orientation pass rate: \
+                 {}/{} ({:.1}%)",
+                passes,
+                total,
+                rate * 100.0
+            );
+
+            const MIN_PASS_RATE: f64 = 0.90;
+            assert!(
+                rate >= MIN_PASS_RATE,
+                "likely_swap orientation pass rate {:.1}% ({}/{}) below floor {:.0}%. \
+                 Sample failures: {:?}",
+                rate * 100.0,
+                passes,
+                total,
+                MIN_PASS_RATE * 100.0,
+                failures.iter().take(5).collect::<Vec<_>>()
+            );
+        } else {
+            let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/bug_report");
+            for name in ["case_01", "case_150", "case_273"] {
+                run_case(&base.join(name), true).unwrap_or_else(|e| panic!("{name}: {e}"));
+            }
+        }
     }
 
     /// When the depth component covers only the centre of the mask, snapping

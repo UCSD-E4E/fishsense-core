@@ -1,0 +1,35 @@
+{
+  "timestamp": 1751411838,
+  "image_shape_hw": [
+    1440,
+    1920
+  ],
+  "mask_shape_hw": [
+    1440,
+    1920
+  ],
+  "expected": {
+    "snout_xy": [
+      1304.7358121330724,
+      1037.0254403131114
+    ],
+    "fork_xy": [
+      1197.651663405088,
+      402.9745596868884
+    ]
+  },
+  "actual": {
+    "snout_xy": [
+      1224.6611328125,
+      389.8331298828125
+    ],
+    "fork_xy": [
+      1233.9583740234375,
+      1015.2393188476562
+    ]
+  },
+  "snout_distance_px": 652.1271662401443,
+  "fork_distance_px": 613.340290985451,
+  "failure_mode": "likely_swap",
+  "notes": "Coords are image-space pixels, [x=col, y=row]. failure_mode='likely_swap' means the endpoints are ~correct but head/tail labels are flipped. 'endpoints_wrong' means at least one returned point isn't near either labeled endpoint."
+}
