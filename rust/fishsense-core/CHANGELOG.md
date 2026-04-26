@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.1](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v1.4.0...fishsense-core-v1.4.1) (2026-04-26)
+
+
+### Bug Fixes
+
+* rescale head/tail coords into depth grid before snapping ([0f40af0](https://github.com/UCSD-E4E/fishsense-core/commit/0f40af0e2861ccb9d85b4f5fbe204c0909bf144f))
+
 ## [1.4.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v1.3.0...fishsense-core-v1.4.0) (2026-04-21)
 
 
