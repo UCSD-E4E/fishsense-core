@@ -1,5 +1,6 @@
 mod fish;
 mod laser;
+mod world_point;
 
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -30,5 +31,10 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     laser::register(py, &laser_mod)?;
     m.setattr("laser", &laser_mod)?;
     sys_modules.set_item("fishsense_core._native.laser", &laser_mod)?;
+
+    let world_point_mod = PyModule::new(py, "fishsense_core._native.world_point")?;
+    world_point::register(py, &world_point_mod)?;
+    m.setattr("world_point", &world_point_mod)?;
+    sys_modules.set_item("fishsense_core._native.world_point", &world_point_mod)?;
     Ok(())
 }
