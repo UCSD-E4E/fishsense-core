@@ -1,0 +1,51 @@
+{
+  "timestamp": 1751048739,
+  "device": "iPad",
+  "category": "regression_baseline",
+  "notes": "Snap behaves correctly here (ratio = 1.000). Used as a regression test that any fix must not break.",
+  "rgb_shape_hw": [
+    1440,
+    1920
+  ],
+  "mask_shape_hw": [
+    1440,
+    1920
+  ],
+  "depth_shape_hw": [
+    192,
+    256
+  ],
+  "epsilon_used": 0.005,
+  "observed": {
+    "find_head_tail_img": {
+      "snout_xy": [
+        1449.0,
+        833.0
+      ],
+      "fork_xy": [
+        649.5,
+        846.5
+      ]
+    },
+    "find_head_tail_depth": {
+      "snout_xy": [
+        1447.5,
+        832.5
+      ],
+      "fork_xy": [
+        652.5,
+        847.5
+      ],
+      "coordinate_space": "mask (RGB) pixels"
+    }
+  },
+  "midpoint_in_depth_grid": [
+    140,
+    112
+  ],
+  "depth_at_midpoint_m": 0.5615234375,
+  "confidence_at_midpoint": 1,
+  "component_size_at_midpoint": 36444,
+  "mask_area_in_depth_grid_px": 2126,
+  "fishsense_core_version": "1.5.0"
+}

@@ -1,6 +1,6 @@
 use ndarray::Array1;
 use std::ops::Index;
-use tracing::{debug, instrument};
+use tracing::{debug, instrument, warn};
 
 use crate::{
     errors::FishSenseError,
@@ -34,15 +34,27 @@ pub struct HeadTailCoords {
 }
 
 /// Head/tail endpoints snapped to the depth map's connected component,
-/// expressed in **depth-index space** (`DepthCoord`). This is the return
-/// type of the lower-level `snap_to_depth_map` entry point; callers who
-/// just want endpoints to plot on the source image or feed into
-/// `FishLengthCalculator` should use `find_head_tail_depth`, which
-/// returns `HeadTailCoords` in mask space.
+/// expressed in **depth-index space** (`DepthCoord` — `[x, y]` where
+/// `x` is a column and `y` is a row of the depth map). This is the
+/// return type of the lower-level `snap_to_depth_map` entry point;
+/// callers who just want endpoints to plot on the source image or feed
+/// into `FishLengthCalculator` should use `find_head_tail_depth`, which
+/// returns `HeadTailCoords` in mask (RGB) space.
 pub struct SnappedDepthMap {
     pub left: DepthCoord,
     pub right: DepthCoord,
 }
+
+/// Minimum number of pixels in the midpoint's connected component for
+/// the snap to be considered meaningful. When the BFS midpoint lands on
+/// a depth-edge pixel — e.g. an ARKit hole, a fin tip silhouetted
+/// against far background, or any 4-neighbourhood whose depths all
+/// differ by more than `EPSILON` — the component degenerates to a
+/// 1-2 pixel island. Both endpoints then snap to the same pixel and
+/// downstream length is ~0. Below this threshold we treat the snap as
+/// unreliable and pass the input coordinates through unchanged. See
+/// `tests/fixtures/head_tail_depth_collapse/` for motivating cases.
+const MIN_COMPONENT_SIZE: usize = 5;
 
 pub struct FishHeadTailDetector {}
 
@@ -134,6 +146,10 @@ impl FishHeadTailDetector {
     /// 2. Those coords are rescaled into the depth grid so `snap_to_depth_map`
     ///    can run nearest-neighbour against depth-grid pixels.
     /// 3. The snapped depth-grid endpoints are rescaled back into mask space.
+    /// 4. The snapped endpoints are validated against the input `mask`: any
+    ///    snapped endpoint that falls outside the mask is replaced with its
+    ///    pre-snap (geometry-refined) value. This catches cases where the
+    ///    snap pulls an endpoint into a neighbouring object.
     ///
     /// Returns `HeadTailCoords` in **mask space** — the same coordinate space
     /// as the input mask, so the result drops directly into anything that
@@ -170,8 +186,38 @@ impl FishHeadTailDetector {
             .snap_to_depth_map(depth_map, &head_d, &tail_d)
             .await?;
 
-        let head = scale_depth_to_image(&snapped.left, mask_dim, depth_dim);
-        let tail = scale_depth_to_image(&snapped.right, mask_dim, depth_dim);
+        let snapped_head = scale_depth_to_image(&snapped.left, mask_dim, depth_dim);
+        let snapped_tail = scale_depth_to_image(&snapped.right, mask_dim, depth_dim);
+
+        // ── Stage 4: Mask-bounded validation ────────────────────────────────
+        // If the snap pushed an endpoint to a depth pixel that doesn't
+        // overlap the fish mask at all, fall back to the pre-snap
+        // (geometry-refined) coordinate for that endpoint. The check is at
+        // depth-grid resolution because that's the grid the snap operates
+        // on — a snap landing inside a depth pixel that covers any mask
+        // pixel is acceptable. Mask-space pixel-precision checks are too
+        // strict: PCA endpoints can sit exactly on the silhouette edge.
+        let head =
+            if pixel_inside_mask_at_depth_grid(mask, &snapped_head, mask_dim, depth_dim) {
+                snapped_head
+            } else {
+                warn!(
+                    snapped_x = snapped_head.0[0], snapped_y = snapped_head.0[1],
+                    "snapped head fell outside mask; reverting to pre-snap endpoint"
+                );
+                coords.head
+            };
+        let tail =
+            if pixel_inside_mask_at_depth_grid(mask, &snapped_tail, mask_dim, depth_dim) {
+                snapped_tail
+            } else {
+                warn!(
+                    snapped_x = snapped_tail.0[0], snapped_y = snapped_tail.0[1],
+                    "snapped tail fell outside mask; reverting to pre-snap endpoint"
+                );
+                coords.tail
+            };
+
         debug!(
             head_x = head.0[0], head_y = head.0[1],
             tail_x = tail.0[0], tail_y = tail.0[1],
@@ -196,6 +242,13 @@ impl FishHeadTailDetector {
     ///   3. Find the component label at the midpoint.
     ///   4. Snap each point to the nearest pixel in that component (L2).
     ///
+    /// Degeneracy guard: if the midpoint's component has fewer than
+    /// `MIN_COMPONENT_SIZE` pixels (i.e. the midpoint lands on a depth
+    /// discontinuity / ARKit hole), the input coordinates are returned
+    /// unchanged. Snapping both endpoints to a 1- or 2-pixel island
+    /// collapses them onto a single pixel and yields a downstream
+    /// length of ~0 — strictly worse than not snapping.
+    ///
     /// Both inputs and outputs are `DepthCoord`s — i.e. coordinates already
     /// expressed on the depth map's index grid (`[x, y]`, where `x` is a
     /// column and `y` is a row of the depth map).
@@ -218,7 +271,6 @@ impl FishHeadTailDetector {
             .min(height.saturating_sub(1));
 
         let target_label = labels[[mid_y, mid_x]];
-        debug!(mid_x, mid_y, target_label, "midpoint component identified");
 
         // Collect every pixel in the same component as the midpoint.
         // Convert from (row, col) → [x, y] to match DepthCoord convention.
@@ -227,6 +279,28 @@ impl FishHeadTailDetector {
             .filter(|&(_, &label)| label == target_label)
             .map(|((row, col), _)| [col as f32, row as f32])
             .collect();
+        debug!(
+            mid_x,
+            mid_y,
+            target_label,
+            component_size = component.len(),
+            "midpoint component identified"
+        );
+
+        // Degenerate component (depth singleton or near-singleton at the
+        // midpoint): snapping would collapse both endpoints onto one pixel.
+        // Pass inputs through so the caller still has distinct coords to
+        // work with — this is the documented degeneracy guard.
+        if component.len() < MIN_COMPONENT_SIZE {
+            warn!(
+                mid_x, mid_y, component_size = component.len(),
+                "midpoint component below MIN_COMPONENT_SIZE; passing input coords through unchanged"
+            );
+            return Ok(SnappedDepthMap {
+                left: DepthCoord(left_depth_coord.0.clone()),
+                right: DepthCoord(right_depth_coord.0.clone()),
+            });
+        }
 
         // Find the component pixel nearest to `coord` by squared Euclidean distance.
         let nearest = |coord: &Array1<f32>| -> Array1<f32> {
@@ -278,6 +352,73 @@ fn scale_depth_to_image(
     let sx = image_w as f32 / depth_w as f32;
     let sy = image_h as f32 / depth_h as f32;
     ImageCoord(ndarray::array![coord.0[0] * sx, coord.0[1] * sy])
+}
+
+/// `true` when the rounded pixel at `coord` sits inside the binary
+/// mask (a non-zero entry). Out-of-bounds and negative coordinates are
+/// treated as outside. Only used by tests; production code uses
+/// [`pixel_inside_mask_at_depth_grid`] which is the resolution at
+/// which the snap actually operates.
+#[cfg(test)]
+fn pixel_inside_mask(mask: &Array2<u8>, coord: &ImageCoord) -> bool {
+    let (height, width) = mask.dim();
+    let x = coord.0[0].round();
+    let y = coord.0[1].round();
+    if !(x.is_finite() && y.is_finite()) || x < 0.0 || y < 0.0 {
+        return false;
+    }
+    let xi = x as usize;
+    let yi = y as usize;
+    if xi >= width || yi >= height {
+        return false;
+    }
+    mask[[yi, xi]] != 0
+}
+
+/// `true` when the depth-grid pixel covering `coord` overlaps any
+/// non-zero entry of `mask`. Equivalent to checking the nearest-
+/// neighbour-downsampled mask at the depth-grid pixel — but computed
+/// directly from the mask without materialising a resized copy.
+///
+/// This is the mask-bounded check `snap_to_depth_map` should satisfy:
+/// the snap operates at depth-grid resolution, so a snap landing on a
+/// depth pixel that overlaps the fish silhouette is acceptable, even
+/// if the mask-space coordinate happens to fall just outside the
+/// mask's pixel boundary (a common artefact of geometry-refined PCA
+/// endpoints sitting exactly on the silhouette edge).
+fn pixel_inside_mask_at_depth_grid(
+    mask: &Array2<u8>,
+    coord: &ImageCoord,
+    image_dim: (usize, usize),
+    depth_dim: (usize, usize),
+) -> bool {
+    let (image_h, image_w) = image_dim;
+    let (depth_h, depth_w) = depth_dim;
+    if depth_h == 0 || depth_w == 0 {
+        return false;
+    }
+    // Project the mask-space coord into depth-grid index space.
+    let dx_f = coord.0[0] * depth_w as f32 / image_w as f32;
+    let dy_f = coord.0[1] * depth_h as f32 / image_h as f32;
+    if !(dx_f.is_finite() && dy_f.is_finite()) || dx_f < 0.0 || dy_f < 0.0 {
+        return false;
+    }
+    let dx = (dx_f.floor() as usize).min(depth_w.saturating_sub(1));
+    let dy = (dy_f.floor() as usize).min(depth_h.saturating_sub(1));
+
+    // Mask-space rectangle covered by depth pixel (dy, dx).
+    let row_start = (dy * image_h) / depth_h;
+    let row_end = (((dy + 1) * image_h) / depth_h).min(image_h);
+    let col_start = (dx * image_w) / depth_w;
+    let col_end = (((dx + 1) * image_w) / depth_w).min(image_w);
+    for r in row_start..row_end {
+        for c in col_start..col_end {
+            if mask[[r, c]] != 0 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -1100,5 +1241,285 @@ mod tests {
                 "{label} mask-y {my} should be inside the strip (mask rows 16..24)"
             );
         }
+    }
+
+    // ── Depth-edge collapse regression (v1.5.0 bug) ──────────────────────
+    //
+    // Pre-fix, when the BFS midpoint inside `snap_to_depth_map` landed on a
+    // depth-edge pixel — every 4-neighbour differing in depth by more than
+    // EPSILON — the connected component degenerated to {seed}. Both
+    // endpoints then snapped to that single pixel, and downstream
+    // `FishLengthCalculator` reported a length near 0 m. The fixtures in
+    // `tests/fixtures/head_tail_depth_collapse/` are the real-world
+    // examples that motivated the fix; the synthetic test below isolates
+    // the failure mode without needing recorded data.
+
+    /// Synthetic depth-edge unit test (regression test #4 in the v1.5.0
+    /// bug report). A horizontal bar mask, a depth map that is uniform
+    /// except for a singleton at the bar's midpoint pixel — the depth
+    /// step is far greater than EPSILON, so the singleton has no
+    /// 4-connected neighbours. Pre-fix this collapsed both endpoints
+    /// onto the singleton; post-fix, the snap is rejected (component
+    /// size below threshold) and the geometry-refined endpoints are
+    /// returned unchanged.
+    #[tokio::test]
+    async fn test_find_head_tail_depth_singleton_at_midpoint_does_not_collapse() {
+        let detector = FishHeadTailDetector {};
+
+        // 40h × 60w mask, horizontal bar (rows 18..22, cols 5..55).
+        let mut mask = Array2::<u8>::zeros((40, 60));
+        for r in 18..22 {
+            for c in 5..55 {
+                mask[[r, c]] = 1;
+            }
+        }
+
+        // Uniform depth EXCEPT (row 20, col 30) which is a depth singleton
+        // (5.0 vs surrounding 1.0 — far above EPSILON = 0.005). The PCA
+        // midpoint of the bar lands near (30, 19/20), so the BFS seed will
+        // hit the singleton or one of its neighbours.
+        let mut depth_data = Array2::<f32>::from_elem((40, 60), 1.0);
+        depth_data[[20, 30]] = 5.0;
+        let depth_map = DepthMap(depth_data);
+
+        let coords = detector
+            .find_head_tail_depth(&mask, &depth_map)
+            .await
+            .expect("detector must succeed on synthetic depth-edge case");
+
+        let head = (coords.head.0[0], coords.head.0[1]);
+        let tail = (coords.tail.0[0], coords.tail.0[1]);
+
+        // The headline regression: must not collapse.
+        assert_ne!(
+            head, tail,
+            "endpoints collapsed onto the depth singleton: {head:?} == {tail:?}"
+        );
+        // Distinct endpoints should still span the bar.
+        assert!(
+            (head.0 - tail.0).abs() >= 30.0,
+            "endpoints should span the bar after fallback, got head={head:?}, tail={tail:?}"
+        );
+        // Both endpoints lie inside the mask.
+        assert!(
+            pixel_inside_mask(&mask, &coords.head),
+            "head {head:?} fell outside the mask"
+        );
+        assert!(
+            pixel_inside_mask(&mask, &coords.tail),
+            "tail {tail:?} fell outside the mask"
+        );
+    }
+
+    /// `pixel_inside_mask` smoke test — covers in-bounds, out-of-bounds,
+    /// negative, and non-finite coordinates.
+    #[test]
+    fn test_pixel_inside_mask_basic() {
+        let mut mask = Array2::<u8>::zeros((10, 20));
+        mask[[5, 7]] = 1;
+
+        // Hit on the set pixel.
+        assert!(pixel_inside_mask(
+            &mask,
+            &ImageCoord(ndarray::array![7.0, 5.0])
+        ));
+        // Adjacent zero pixel.
+        assert!(!pixel_inside_mask(
+            &mask,
+            &ImageCoord(ndarray::array![6.0, 5.0])
+        ));
+        // Out of bounds.
+        assert!(!pixel_inside_mask(
+            &mask,
+            &ImageCoord(ndarray::array![100.0, 100.0])
+        ));
+        // Negative coords.
+        assert!(!pixel_inside_mask(
+            &mask,
+            &ImageCoord(ndarray::array![-1.0, 5.0])
+        ));
+        // NaN.
+        assert!(!pixel_inside_mask(
+            &mask,
+            &ImageCoord(ndarray::array![f32::NAN, 5.0])
+        ));
+    }
+
+    // ── Real-world fixture regressions (v1.5.0 bug bundle) ────────────────
+    //
+    // The bundle in `tests/fixtures/head_tail_depth_collapse/` contains
+    // the four cases the upstream consumer (fishsense-mobile) flagged:
+    // three catastrophic singletons (case 01–03) and a well-behaved
+    // baseline (case 04). The catastrophic cases must produce distinct,
+    // mask-bounded endpoints; the baseline must not regress significantly
+    // from the v1.5.0 post-snap output recorded in metadata.json.
+
+    fn load_collapse_fixture(name: &str) -> (Array2<u8>, DepthMap) {
+        use ndarray_npy::read_npy;
+        use std::path::PathBuf;
+
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/head_tail_depth_collapse")
+            .join(name);
+        let mask: Array2<u8> = read_npy(dir.join("mask.npy")).expect("mask.npy load");
+        let depth: Array2<f32> = read_npy(dir.join("depth_map.npy")).expect("depth_map.npy load");
+        (mask, DepthMap(depth))
+    }
+
+    /// Catastrophic case: 1-pixel midpoint component on iPad. Pre-fix
+    /// returned (1065, 690) for both endpoints; post-fix must return
+    /// distinct, mask-bounded endpoints near the pre-snap PCA values.
+    #[tokio::test]
+    async fn test_find_head_tail_depth_fixture_case_01_no_collapse() {
+        let detector = FishHeadTailDetector {};
+        let (mask, depth_map) = load_collapse_fixture("case_01_catastrophic_zero");
+
+        let coords = detector
+            .find_head_tail_depth(&mask, &depth_map)
+            .await
+            .expect("detector must succeed on catastrophic case 01");
+
+        assert_endpoints_not_collapsed(&mask, &depth_map, &coords).await;
+    }
+
+    /// Catastrophic case: 2-pixel midpoint component on iPhone.
+    #[tokio::test]
+    async fn test_find_head_tail_depth_fixture_case_02_no_collapse() {
+        let detector = FishHeadTailDetector {};
+        let (mask, depth_map) = load_collapse_fixture("case_02_catastrophic_2px_iphone");
+
+        let coords = detector
+            .find_head_tail_depth(&mask, &depth_map)
+            .await
+            .expect("detector must succeed on catastrophic case 02");
+
+        assert_endpoints_not_collapsed(&mask, &depth_map, &coords).await;
+    }
+
+    /// Catastrophic case: 2-pixel midpoint component on iPad.
+    #[tokio::test]
+    async fn test_find_head_tail_depth_fixture_case_03_no_collapse() {
+        let detector = FishHeadTailDetector {};
+        let (mask, depth_map) = load_collapse_fixture("case_03_catastrophic_2px_ipad");
+
+        let coords = detector
+            .find_head_tail_depth(&mask, &depth_map)
+            .await
+            .expect("detector must succeed on catastrophic case 03");
+
+        assert_endpoints_not_collapsed(&mask, &depth_map, &coords).await;
+    }
+
+    /// Shared assertions for the catastrophic-collapse cases (regression
+    /// test #1 from the v1.5.0 bug report):
+    /// 1. Endpoints are not coincident.
+    /// 2. The two endpoints do not both sit inside a ≤ 2-pixel
+    ///    connected component (i.e. they did not collapse onto the same
+    ///    depth singleton).
+    /// 3. Both endpoints lie inside the mask (regression test #2).
+    async fn assert_endpoints_not_collapsed(
+        mask: &Array2<u8>,
+        depth_map: &DepthMap,
+        coords: &HeadTailCoords,
+    ) {
+        let head = (coords.head.0[0], coords.head.0[1]);
+        let tail = (coords.tail.0[0], coords.tail.0[1]);
+
+        assert_ne!(
+            head, tail,
+            "endpoints collapsed: head {head:?} == tail {tail:?}"
+        );
+
+        // Probe the component label at each endpoint's depth-grid pixel.
+        // The collapse failure mode lands both endpoints on the same
+        // ≤ 2-pixel component, so the assertion catches both the
+        // strictly-coincident form and the "off-by-one within the same
+        // tiny island" form (case 02/03's 2-pixel components).
+        let mask_dim = mask.dim();
+        let depth_dim = depth_map.0.dim();
+        let head_d = scale_image_to_depth(&coords.head, mask_dim, depth_dim);
+        let tail_d = scale_image_to_depth(&coords.tail, mask_dim, depth_dim);
+        let labels = connected_components(depth_map, 0.005)
+            .await
+            .expect("connected_components must succeed");
+        let (h, w) = labels.dim();
+        let pixel_at = |c: &DepthCoord| -> (usize, usize) {
+            let x = (c.0[0].round() as usize).min(w.saturating_sub(1));
+            let y = (c.0[1].round() as usize).min(h.saturating_sub(1));
+            (y, x)
+        };
+        let (hy, hx) = pixel_at(&head_d);
+        let (ty, tx) = pixel_at(&tail_d);
+        let head_label = labels[[hy, hx]];
+        let tail_label = labels[[ty, tx]];
+        if head_label == tail_label {
+            let component_size = labels.iter().filter(|&&l| l == head_label).count();
+            assert!(
+                component_size > 2,
+                "head and tail both sit in a shared {component_size}-pixel component — collapse not avoided"
+            );
+        }
+
+        // Both endpoints must sit inside the mask region at depth-grid
+        // resolution (regression test #2: "project endpoints into the
+        // depth grid; pixel must be inside the resized mask").
+        assert!(
+            pixel_inside_mask_at_depth_grid(mask, &coords.head, mask_dim, depth_dim),
+            "head {head:?} (depth-grid pixel) does not overlap the mask"
+        );
+        assert!(
+            pixel_inside_mask_at_depth_grid(mask, &coords.tail, mask_dim, depth_dim),
+            "tail {tail:?} (depth-grid pixel) does not overlap the mask"
+        );
+    }
+
+    /// Baseline preservation (regression test #3 in the v1.5.0 bug
+    /// report): on the well-behaved case the snap is small and useful;
+    /// the post-fix output must still be within a few pixels of the
+    /// recorded v1.5.0 post-snap output. Tolerance is set to 5 px to
+    /// allow for minor numerical jitter while catching any meaningful
+    /// regression in the snap path.
+    #[tokio::test]
+    async fn test_find_head_tail_depth_fixture_case_04_baseline_preserved() {
+        let detector = FishHeadTailDetector {};
+        let (mask, depth_map) = load_collapse_fixture("case_04_well_behaved_baseline");
+
+        // Recorded v1.5.0 post-snap output (from metadata.json).
+        let v15_snout = [1447.5_f32, 832.5];
+        let v15_fork = [652.5_f32, 847.5];
+        const TOL_PX: f32 = 5.0;
+
+        let coords = detector
+            .find_head_tail_depth(&mask, &depth_map)
+            .await
+            .expect("detector must succeed on baseline case 04");
+
+        let head = [coords.head.0[0], coords.head.0[1]];
+        let tail = [coords.tail.0[0], coords.tail.0[1]];
+
+        let dist = |a: [f32; 2], b: [f32; 2]| -> f32 {
+            ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt()
+        };
+
+        // Match orientation: head in v1.5.0 was on the right (snout side).
+        let head_to_snout = dist(head, v15_snout);
+        let head_to_fork = dist(head, v15_fork);
+        let tail_to_fork = dist(tail, v15_fork);
+        let tail_to_snout = dist(tail, v15_snout);
+        let (head_diff, tail_diff) = if head_to_snout + tail_to_fork
+            <= head_to_fork + tail_to_snout
+        {
+            (head_to_snout, tail_to_fork)
+        } else {
+            (head_to_fork, tail_to_snout)
+        };
+        assert!(
+            head_diff <= TOL_PX,
+            "head {head:?} drifted {head_diff:.1} px from v1.5.0 baseline (tol {TOL_PX} px)"
+        );
+        assert!(
+            tail_diff <= TOL_PX,
+            "tail {tail:?} drifted {tail_diff:.1} px from v1.5.0 baseline (tol {TOL_PX} px)"
+        );
     }
 }

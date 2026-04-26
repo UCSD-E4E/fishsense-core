@@ -1,0 +1,51 @@
+{
+  "timestamp": 1751572769,
+  "device": "iPad",
+  "category": "catastrophic_1px_component",
+  "notes": "Component size 2; both endpoints collapse. Measured 0.005 m vs truth 0.276 m.",
+  "rgb_shape_hw": [
+    1440,
+    1920
+  ],
+  "mask_shape_hw": [
+    1440,
+    1920
+  ],
+  "depth_shape_hw": [
+    192,
+    256
+  ],
+  "epsilon_used": 0.005,
+  "observed": {
+    "find_head_tail_img": {
+      "snout_xy": [
+        733.9067993164062,
+        777.102783203125
+      ],
+      "fork_xy": [
+        678.0,
+        651.0
+      ]
+    },
+    "find_head_tail_depth": {
+      "snout_xy": [
+        705.0,
+        712.5
+      ],
+      "fork_xy": [
+        705.0,
+        705.0
+      ],
+      "coordinate_space": "mask (RGB) pixels"
+    }
+  },
+  "midpoint_in_depth_grid": [
+    94,
+    95
+  ],
+  "depth_at_midpoint_m": 0.66455078125,
+  "confidence_at_midpoint": 0,
+  "component_size_at_midpoint": 2,
+  "mask_area_in_depth_grid_px": 201,
+  "fishsense_core_version": "1.5.0"
+}

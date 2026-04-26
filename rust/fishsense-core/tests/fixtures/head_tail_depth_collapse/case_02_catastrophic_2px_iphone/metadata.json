@@ -1,0 +1,51 @@
+{
+  "timestamp": 1751559326,
+  "device": "iPhone",
+  "category": "catastrophic_1px_component",
+  "notes": "Component size 2; both endpoints snap to one of those two pixels. Measured 0.011 m vs truth 1.067 m. ARKit confidence 0 at midpoint.",
+  "rgb_shape_hw": [
+    1440,
+    1920
+  ],
+  "mask_shape_hw": [
+    1440,
+    1920
+  ],
+  "depth_shape_hw": [
+    192,
+    256
+  ],
+  "epsilon_used": 0.005,
+  "observed": {
+    "find_head_tail_img": {
+      "snout_xy": [
+        1105.0,
+        694.0
+      ],
+      "fork_xy": [
+        1391.0,
+        541.0
+      ]
+    },
+    "find_head_tail_depth": {
+      "snout_xy": [
+        1245.0,
+        622.5
+      ],
+      "fork_xy": [
+        1245.0,
+        615.0
+      ],
+      "coordinate_space": "mask (RGB) pixels"
+    }
+  },
+  "midpoint_in_depth_grid": [
+    166,
+    82
+  ],
+  "depth_at_midpoint_m": 1.8623046875,
+  "confidence_at_midpoint": 0,
+  "component_size_at_midpoint": 2,
+  "mask_area_in_depth_grid_px": 1040,
+  "fishsense_core_version": "1.5.0"
+}
