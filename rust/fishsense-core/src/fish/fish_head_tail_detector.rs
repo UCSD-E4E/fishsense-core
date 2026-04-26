@@ -33,11 +33,12 @@ pub struct HeadTailCoords {
     pub tail: ImageCoord,
 }
 
-/// Head/tail endpoints snapped to the depth map's connected component.
-/// Coordinates are in **depth-index space** (`DepthCoord`), which on
-/// iOS is the LiDAR resolution and may be coarser than the mask. To
-/// project these back into image space, multiply by
-/// `(image_dim / depth_dim)`.
+/// Head/tail endpoints snapped to the depth map's connected component,
+/// expressed in **depth-index space** (`DepthCoord`). This is the return
+/// type of the lower-level `snap_to_depth_map` entry point; callers who
+/// just want endpoints to plot on the source image or feed into
+/// `FishLengthCalculator` should use `find_head_tail_depth`, which
+/// returns `HeadTailCoords` in mask space.
 pub struct SnappedDepthMap {
     pub left: DepthCoord,
     pub right: DepthCoord,
@@ -129,52 +130,65 @@ impl FishHeadTailDetector {
 
     /// Full three-stage pipeline: PCA → geometry refinement → depth-map snap.
     ///
-    /// Calls `find_head_tail_img` for stages 1–2 (which produces image-space
-    /// `ImageCoord`s on the mask grid), rescales those into depth-index space
-    /// using `mask.dim()` and `depth_map.0.dim()`, then snaps each rescaled
-    /// point to the nearest pixel of the depth component that contains the
-    /// midpoint (see `snap_to_depth_map`).
+    /// 1. `find_head_tail_img` produces image-space endpoints on the mask grid.
+    /// 2. Those coords are rescaled into the depth grid so `snap_to_depth_map`
+    ///    can run nearest-neighbour against depth-grid pixels.
+    /// 3. The snapped depth-grid endpoints are rescaled back into mask space.
     ///
-    /// Rescaling is required whenever `mask.dim() != depth_map.0.dim()`: the
-    /// snap step indexes the depth map and runs nearest-neighbour against
-    /// depth-grid pixel coordinates, so feeding raw image-space coords into
-    /// it (the pre-1.4.0 behaviour) collapsed both endpoints to the depth
-    /// map's bottom-right corner whenever the mask was higher-resolution
-    /// than the depth map (the standard iOS ARKit configuration).
+    /// Returns `HeadTailCoords` in **mask space** — the same coordinate space
+    /// as the input mask, so the result drops directly into anything that
+    /// already speaks image coords (overlay rendering, `FishLengthCalculator`,
+    /// labelled-keypoint comparisons). Callers that need the depth-grid
+    /// indices directly (e.g. to sample depth values from `depth_map`) should
+    /// drive `snap_to_depth_map` themselves; that lower-level entry point
+    /// keeps a `DepthCoord` in / `DepthCoord` out contract.
     ///
-    /// Returns `SnappedDepthMap { left: head, right: tail }` in
-    /// **depth-index space** (`DepthCoord`).
+    /// Note: the rescale-to-depth-grid step is required whenever
+    /// `mask.dim() != depth_map.0.dim()`. Skipping it (the pre-1.4.1
+    /// behaviour) collapsed both endpoints to the depth map's bottom-right
+    /// corner whenever the mask was higher-resolution than the depth map —
+    /// the standard iOS ARKit configuration (~1920×1440 RGB mask alongside
+    /// 256×192 LiDAR depth).
     #[instrument(skip(self, mask, depth_map), fields(height = mask.dim().0, width = mask.dim().1))]
     pub async fn find_head_tail_depth(
         &self,
         mask: &Array2<u8>,
         depth_map: &DepthMap,
-    ) -> Result<SnappedDepthMap, FishSenseError> {
+    ) -> Result<HeadTailCoords, FishSenseError> {
         let coords = self.find_head_tail_img(mask)?;
 
         // ── Stage 3: Snap to depth map ──────────────────────────────────────
-        // Rescale image-space endpoints into depth-index space before
-        // snapping. `find_head_tail_img` produces coords on the mask grid,
-        // but `snap_to_depth_map` indexes the depth grid — without rescaling,
-        // mismatched grids produce a clamp-to-corner collapse.
-        let head_d = scale_image_to_depth(&coords.head, mask.dim(), depth_map.0.dim());
-        let tail_d = scale_image_to_depth(&coords.tail, mask.dim(), depth_map.0.dim());
+        // Rescale image-space endpoints into depth-index space, snap on the
+        // depth grid, then rescale the snapped points back into mask space so
+        // the caller never has to think about the depth grid's resolution.
+        let mask_dim = mask.dim();
+        let depth_dim = depth_map.0.dim();
+        let head_d = scale_image_to_depth(&coords.head, mask_dim, depth_dim);
+        let tail_d = scale_image_to_depth(&coords.tail, mask_dim, depth_dim);
 
         let snapped = self
             .snap_to_depth_map(depth_map, &head_d, &tail_d)
             .await?;
 
+        let head = scale_depth_to_image(&snapped.left, mask_dim, depth_dim);
+        let tail = scale_depth_to_image(&snapped.right, mask_dim, depth_dim);
         debug!(
-            head_x = snapped.left.0[0], head_y = snapped.left.0[1],
-            tail_x = snapped.right.0[0], tail_y = snapped.right.0[1],
-            "endpoints snapped to depth component"
+            head_x = head.0[0], head_y = head.0[1],
+            tail_x = tail.0[0], tail_y = tail.0[1],
+            "endpoints snapped to depth component, rescaled back to mask space"
         );
-        Ok(snapped)
+        Ok(HeadTailCoords { head, tail })
     }
 
     /// Snaps `left_depth_coord` and `right_depth_coord` to the nearest pixel
     /// of the connected depth component that contains the midpoint between
     /// them.
+    ///
+    /// Lower-level entry point. Most callers want `find_head_tail_depth`,
+    /// which handles the full pipeline and returns mask-space coordinates;
+    /// reach for `snap_to_depth_map` when you already have depth-grid coords
+    /// or when you need the depth-grid indices directly (e.g. to sample
+    /// depth values out of the same `DepthMap` afterwards).
     ///
     /// Mirrors the Python `correct_labels` function in 01_process.ipynb:
     ///   1. Compute the midpoint of the two points.
@@ -184,9 +198,7 @@ impl FishHeadTailDetector {
     ///
     /// Both inputs and outputs are `DepthCoord`s — i.e. coordinates already
     /// expressed on the depth map's index grid (`[x, y]`, where `x` is a
-    /// column and `y` is a row of the depth map). Callers holding
-    /// image-space coords must rescale first; `find_head_tail_depth` does
-    /// this for the public pipeline.
+    /// column and `y` is a row of the depth map).
     #[instrument(skip(self, depth_map, left_depth_coord, right_depth_coord))]
     pub async fn snap_to_depth_map(
         &self,
@@ -254,6 +266,20 @@ fn scale_image_to_depth(
     DepthCoord(ndarray::array![coord.0[0] * sx, coord.0[1] * sy])
 }
 
+/// Inverse of `scale_image_to_depth`: rescales a depth-index `[x, y]`
+/// coordinate back into image (mask) space.
+fn scale_depth_to_image(
+    coord: &DepthCoord,
+    image_dim: (usize, usize),
+    depth_dim: (usize, usize),
+) -> ImageCoord {
+    let (image_h, image_w) = image_dim;
+    let (depth_h, depth_w) = depth_dim;
+    let sx = image_w as f32 / depth_w as f32;
+    let sy = image_h as f32 / depth_h as f32;
+    ImageCoord(ndarray::array![coord.0[0] * sx, coord.0[1] * sy])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,7 +344,8 @@ mod tests {
 
     /// A synthetic "fish": wide horizontal bar with full-coverage depth map.
     /// After PCA + geometry + snap, head and tail should be near the two ends
-    /// of the bar (col ≈ 2 and col ≈ 57).
+    /// of the bar (col ≈ 2 and col ≈ 57). Mask and depth grids match here so
+    /// mask-space and depth-index space numerically coincide.
     #[tokio::test]
     async fn test_find_head_tail_horizontal_bar() {
         let detector = FishHeadTailDetector {};
@@ -336,11 +363,11 @@ mod tests {
 
         let result = detector.find_head_tail_depth(&mask, &depth_map).await;
         assert!(result.is_ok(), "find_head_tail failed: {:?}", result.err());
-        let snapped = result.unwrap();
+        let coords = result.unwrap();
 
-        // head (left) and tail (right) should be near the two extreme columns.
-        let head_col = snapped.left[0] as usize;
-        let tail_col = snapped.right[0] as usize;
+        // head and tail should be near the two extreme columns of the mask.
+        let head_col = coords.head.0[0] as usize;
+        let tail_col = coords.tail.0[0] as usize;
 
         let (min_col, max_col) = if head_col < tail_col {
             (head_col, tail_col)
@@ -382,13 +409,13 @@ mod tests {
 
         let result = detector.find_head_tail_depth(&mask, &depth_map).await;
         assert!(result.is_ok());
-        let snapped = result.unwrap();
+        let coords = result.unwrap();
 
-        // Snapped points must be inside the mask region (rows 8..12, cols 2..58).
-        let head_r = snapped.left[1] as usize;
-        let head_c = snapped.left[0] as usize;
-        let tail_r = snapped.right[1] as usize;
-        let tail_c = snapped.right[0] as usize;
+        // Returned points must be inside the mask region (rows 8..12, cols 2..58).
+        let head_r = coords.head.0[1] as usize;
+        let head_c = coords.head.0[0] as usize;
+        let tail_r = coords.tail.0[1] as usize;
+        let tail_c = coords.tail.0[0] as usize;
 
         assert!(
             (8..12).contains(&head_r) && (2..58).contains(&head_c),
@@ -898,7 +925,9 @@ mod tests {
     /// When the depth component covers only the centre of the mask, snapping
     /// must pull the endpoints inward relative to the raw image coordinates.
     /// This verifies that `find_head_tail_depth` ≠ `find_head_tail_img` when
-    /// the depth coverage is limited.
+    /// the depth coverage is limited. Mask and depth grids are the same size
+    /// here so the depth-strip bounds (cols 20..40) are also the bounds in
+    /// mask space.
     #[tokio::test]
     async fn test_find_head_tail_depth_snaps_endpoints_toward_depth_component() {
         let detector = FishHeadTailDetector {};
@@ -930,33 +959,39 @@ mod tests {
             "img endpoints should span the full bar, got cols {img_head_col} and {img_tail_col}"
         );
 
-        // depth coords must be snapped inside the centre strip (cols 20..40).
-        let snapped = detector.find_head_tail_depth(&mask, &depth_map).await.unwrap();
-        let snapped_head_col = snapped.left[0] as usize;
-        let snapped_tail_col = snapped.right[0] as usize;
+        // After snapping, both endpoints must land inside the centre strip
+        // (mask cols 20..40, identical to depth cols here since grids match).
+        let coords = detector.find_head_tail_depth(&mask, &depth_map).await.unwrap();
+        let head_col = coords.head.0[0] as usize;
+        let tail_col = coords.tail.0[0] as usize;
         assert!(
-            (20..40).contains(&snapped_head_col),
-            "snapped head col {snapped_head_col} should be inside depth strip 20..40"
+            (20..40).contains(&head_col),
+            "head col {head_col} should be inside the strip mapped to mask cols 20..40"
         );
         assert!(
-            (20..40).contains(&snapped_tail_col),
-            "snapped tail col {snapped_tail_col} should be inside depth strip 20..40"
+            (20..40).contains(&tail_col),
+            "tail col {tail_col} should be inside the strip mapped to mask cols 20..40"
         );
     }
 
     // ── Regression tests for mismatched mask/depth grids (iOS standard) ──
     //
-    // Pre-fix, when the mask grid was finer than the depth grid (e.g. 1920×1440
-    // RGB mask alongside 256×192 ARKit depth), `snap_to_depth_map` clamped the
-    // mask-space midpoint into the depth grid's bottom-right corner and the
-    // nearest-neighbour search collapsed both endpoints onto a single corner
-    // pixel. These tests use a 2× downsample (mask 60×40 / depth 30×20) so a
-    // CI runner without a GPU can exercise the CPU `connected_components`
-    // fallback quickly.
-
+    // Pre-1.4.1, when the mask grid was finer than the depth grid (e.g.
+    // 1920×1440 RGB mask alongside 256×192 ARKit depth), `snap_to_depth_map`
+    // clamped the mask-space midpoint into the depth grid's bottom-right
+    // corner and the nearest-neighbour search collapsed both endpoints onto
+    // a single corner pixel. Pre-1.5.0, the public return type leaked the
+    // depth grid's index space onto the caller — overlay points clustered
+    // in the upper-left of landscape RGB frames until the iOS bridge added
+    // a manual rescale. These tests use a 2× downsample (mask 60×40 /
+    // depth 30×20) so a CI runner without a GPU can exercise the CPU
+    // `connected_components` fallback quickly, AND they assert that the
+    // public return is in mask space (range checks against mask dims, not
+    // depth dims).
+    //
     /// Mask resolution > depth resolution, depth is uniform (single
-    /// component). Endpoints must remain distinct (not collapsed to a corner)
-    /// and project back into the mask bar after rescaling.
+    /// component). Endpoints must remain distinct (not collapsed) and lie
+    /// inside the mask bar in mask-space coordinates.
     #[tokio::test]
     async fn test_find_head_tail_depth_higher_res_mask_full_coverage() {
         let detector = FishHeadTailDetector {};
@@ -972,31 +1007,38 @@ mod tests {
         // Depth: 20h × 30w (2× downsample), uniform → one component.
         let depth_map = DepthMap(Array2::<f32>::from_elem((20, 30), 1.0));
 
-        let snapped = detector
+        let coords = detector
             .find_head_tail_depth(&mask, &depth_map)
             .await
             .expect("detector should succeed on mismatched grids");
 
-        let head = (snapped.left[0], snapped.left[1]);
-        let tail = (snapped.right[0], snapped.right[1]);
+        let head = (coords.head.0[0], coords.head.0[1]);
+        let tail = (coords.tail.0[0], coords.tail.0[1]);
 
-        // The pre-fix bug collapsed both endpoints onto the depth grid's
-        // bottom-right corner (29, 19).
-        assert_ne!(
-            head, tail,
-            "snapped endpoints collapsed to a single point: {head:?}",
+        // Pre-1.5.0, this returned depth-index coords (max ~29 × ~19) — a
+        // mask-space range check would have failed. After the v1.5.0 fix,
+        // the result is mask-space and must fit inside the mask dims.
+        assert!(
+            (0.0..60.0).contains(&head.0) && (0.0..40.0).contains(&head.1),
+            "head {head:?} must be in mask space (60w × 40h), not depth-index space"
         );
         assert!(
-            (head.0 - tail.0).abs() >= 10.0,
-            "endpoints should span the bar in depth-x, got head={head:?}, tail={tail:?}"
+            (0.0..60.0).contains(&tail.0) && (0.0..40.0).contains(&tail.1),
+            "tail {tail:?} must be in mask space (60w × 40h), not depth-index space"
         );
 
-        // Rescale each snapped point back into mask space and check it lies
-        // inside the mask bar (rows 16..24, cols 5..55) — small slack at the
-        // ends is fine because PCA endpoints sit just inside the bar.
-        for (label, dx, dy) in [("head", head.0, head.1), ("tail", tail.0, tail.1)] {
-            let mx = dx * 60.0 / 30.0;
-            let my = dy * 40.0 / 20.0;
+        // Pre-1.4.1 the snap stage collapsed both endpoints onto a single
+        // corner; assert they remain distinct and span the bar.
+        assert_ne!(head, tail, "endpoints collapsed to a single point: {head:?}");
+        assert!(
+            (head.0 - tail.0).abs() >= 20.0,
+            "endpoints should span the bar in mask-x, got head={head:?}, tail={tail:?}"
+        );
+
+        // Each endpoint should sit inside the mask bar — small slack at the
+        // ends is fine because PCA endpoints sit just inside the bar, and
+        // depth-grid quantisation (2× coarser) loses sub-pixel position.
+        for (label, mx, my) in [("head", head.0, head.1), ("tail", tail.0, tail.1)] {
             assert!(
                 (4.0..=56.0).contains(&mx),
                 "{label} mask-x {mx} should be near the bar (cols 5..55)"
@@ -1009,8 +1051,10 @@ mod tests {
     }
 
     /// Mask resolution > depth resolution, depth covers only a centre strip.
-    /// Snapping must pull both endpoints into the strip while keeping them
-    /// distinct.
+    /// Snapping must pull both endpoints into the strip; the public return is
+    /// in mask space, so the assertions are against the strip's image-space
+    /// projection (depth cols 12..18 → mask cols 24..36; depth rows 8..12 →
+    /// mask rows 16..24).
     #[tokio::test]
     async fn test_find_head_tail_depth_higher_res_mask_partial_depth() {
         let detector = FishHeadTailDetector {};
@@ -1034,28 +1078,26 @@ mod tests {
         }
         let depth_map = DepthMap(depth_data);
 
-        let snapped = detector
+        let coords = detector
             .find_head_tail_depth(&mask, &depth_map)
             .await
             .expect("detector should succeed on mismatched grids");
 
-        let head = (snapped.left[0], snapped.left[1]);
-        let tail = (snapped.right[0], snapped.right[1]);
-        assert_ne!(
-            head, tail,
-            "snapped endpoints collapsed to a single point: {head:?}",
-        );
+        let head = (coords.head.0[0], coords.head.0[1]);
+        let tail = (coords.tail.0[0], coords.tail.0[1]);
+        assert_ne!(head, tail, "endpoints collapsed to a single point: {head:?}");
 
-        for (label, x, y) in [("head", head.0, head.1), ("tail", tail.0, tail.1)] {
-            let xu = x as usize;
-            let yu = y as usize;
+        // Strip in mask space: cols [12*2, 18*2) = [24, 36); rows [8*2, 12*2)
+        // = [16, 24). Endpoints should land inside that mask-space strip.
+        for (label, mx, my) in [("head", head.0, head.1), ("tail", tail.0, tail.1)] {
             assert!(
-                (12..18).contains(&xu),
-                "{label} depth-x {x} should be inside strip cols 12..18"
+                (24.0..36.0).contains(&mx),
+                "{label} mask-x {mx} should be inside the strip (mask cols 24..36) — \
+                 returns must be in mask space, not depth-index space"
             );
             assert!(
-                (8..12).contains(&yu),
-                "{label} depth-y {y} should be inside strip rows 8..12"
+                (16.0..24.0).contains(&my),
+                "{label} mask-y {my} should be inside the strip (mask rows 16..24)"
             );
         }
     }

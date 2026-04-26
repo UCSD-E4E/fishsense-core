@@ -57,9 +57,9 @@ impl FishHeadTailDetector {
             .map_err(|e| PyValueError::new_err(format!("expected a 2D (H, W) f32 depth map: {e}")))?;
         let depth_map_rust = DepthMap(depth_rust);
 
-        let snapped = pollster::block_on(self.inner.find_head_tail_depth(&mask_rust, &depth_map_rust))
+        let coords = pollster::block_on(self.inner.find_head_tail_depth(&mask_rust, &depth_map_rust))
             .map_err(|e| PyValueError::new_err(format!("find_head_tail_depth failed: {e}")))?;
 
-        Ok((snapped.left.0.into_pyarray(py), snapped.right.0.into_pyarray(py)))
+        Ok((coords.head.0.into_pyarray(py), coords.tail.0.into_pyarray(py)))
     }
 }
