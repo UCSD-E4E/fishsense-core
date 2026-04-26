@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v1.4.1...fishsense-core-v1.5.0) (2026-04-26)
+
+
+### Features
+
+* return mask-space coords from find_head_tail_depth ([08577b3](https://github.com/UCSD-E4E/fishsense-core/commit/08577b3640b9cb640ce91756655864248af1a3ca))
+
 ## [1.4.1](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v1.4.0...fishsense-core-v1.4.1) (2026-04-26)
 
 
