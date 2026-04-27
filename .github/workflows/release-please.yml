@@ -46,8 +46,10 @@ jobs:
           command: build
           args: --release --strip --manifest-path python/fishsense_core/Cargo.toml --out target/wheels --find-interpreter
           target: x86_64-unknown-linux-gnu
-          manylinux: 2_28
+          manylinux: 2_34
           before-script-linux: |
+            dnf install -y dnf-plugins-core epel-release
+            dnf config-manager --set-enabled crb
             dnf install -y llvm-devel clang-devel opencv-devel openblas-devel openssl-devel
       - name: Upload wheel to release
         env:
