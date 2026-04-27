@@ -19,6 +19,10 @@ fn main() {
 
         let client = reqwest::blocking::Client::builder()
             .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
+            .tcp_keepalive(Some(Duration::from_secs(30)))
+            .no_gzip()
+            .no_brotli()
+            .no_deflate()
             .build()
             .expect("failed to build HTTP client");
 
@@ -34,7 +38,7 @@ fn main() {
                     .map_err(|e| e.to_string())?;
                 let mut file = std::fs::File::create(&tmp_path)
                     .map_err(|e| e.to_string())?;
-                response.copy_to(&mut file).map_err(|e| e.to_string())?;
+                std::io::copy(&mut response, &mut file).map_err(|e| e.to_string())?;
                 file.flush().map_err(|e| e.to_string())?;
                 std::fs::rename(&tmp_path, &model_path).map_err(|e| e.to_string())?;
                 Ok(())
