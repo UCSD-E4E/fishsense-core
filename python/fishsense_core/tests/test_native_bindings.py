@@ -12,6 +12,7 @@ import pytest
 
 from fishsense_core.fish import FishHeadTailDetector, FishSegmentation
 from fishsense_core.laser import calibrate_laser
+from fishsense_core.world_point import WorldPointHandler
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +46,61 @@ class TestCalibrateLaser:
         assert orientation.shape == (3,)
         assert np.issubdtype(origin.dtype, np.floating)
         assert np.issubdtype(orientation.dtype, np.floating)
+
+
+# ---------------------------------------------------------------------------
+# WorldPointHandler
+# ---------------------------------------------------------------------------
+
+class TestWorldPointHandler:
+    """The Python wrapper coerces all array inputs to float64 before the
+    native call, so callers don't need to think about dtype. The native
+    binding rejects non-float64 arrays at the PyO3 boundary; without the
+    coercion stage13 in fishsense-lite-mono crashed on every dive whose
+    laser_label coordinates came back from the SDK as ints.
+    """
+
+    @staticmethod
+    def _identity():
+        return WorldPointHandler(np.eye(3))
+
+    def test_project_image_point_int_input(self):
+        """Regression: int-dtype image_point must not raise."""
+        result = self._identity().project_image_point(np.array([100, 200]))
+        assert result.shape == (3,)
+        np.testing.assert_allclose(result, [100.0, 200.0, 1.0])
+
+    def test_project_image_point_float64_input(self):
+        result = self._identity().project_image_point(np.array([3.0, 4.0]))
+        np.testing.assert_allclose(result, [3.0, 4.0, 1.0])
+
+    def test_project_image_point_float32_input(self):
+        result = self._identity().project_image_point(np.array([3.0, 4.0], dtype=np.float32))
+        np.testing.assert_allclose(result, [3.0, 4.0, 1.0])
+
+    def test_project_image_point_python_list_input(self):
+        """np.asarray accepts plain lists too — wrapper should handle that."""
+        result = self._identity().project_image_point([3, 4])
+        np.testing.assert_allclose(result, [3.0, 4.0, 1.0])
+
+    def test_compute_world_point_from_depth_int_inputs(self):
+        result = self._identity().compute_world_point_from_depth(np.array([3, 4]), 2)
+        np.testing.assert_allclose(result, [6.0, 8.0, 2.0])
+
+    def test_compute_world_point_from_laser_int_inputs(self):
+        """All three array args (origin, axis, image_point) must accept ints."""
+        result = self._identity().compute_world_point_from_laser(
+            np.array([0, 0, -2]),  # laser_origin
+            np.array([1, 0, 0]),  # laser_axis (perpendicular to camera ray)
+            np.array([0, 0]),  # image_point
+        )
+        # closest point on camera ray (0,0,-t) to laser line (s,0,-2) is (0,0,-2)
+        np.testing.assert_allclose(result, [0.0, 0.0, -2.0], atol=1e-5)
+
+    def test_constructor_int_intrinsics(self):
+        """K_inv passed as ints (e.g. np.eye default int dtype after astype) must work."""
+        h = WorldPointHandler(np.eye(3, dtype=np.int64))
+        assert h is not None
 
 
 # ---------------------------------------------------------------------------
