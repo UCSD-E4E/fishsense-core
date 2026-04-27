@@ -21,7 +21,7 @@ from fishsense_core.laser import calibrate_laser
 class TestCalibrateLaser:
     def test_vertical_line_returns_origin_and_z_axis(self):
         """Two points along the z-axis → origin at (0,0,0), orientation (0,0,1)."""
-        points = np.array([[0.0, 0.0, 1.0], [0.0, 0.0, 2.0]])
+        points = np.array([[0.0, 0.0, 1.0], [0.0, 0.0, 2.0]], dtype=np.float32)
         origin, orientation = calibrate_laser(points)
 
         np.testing.assert_allclose(origin, [0.0, 0.0, 0.0], atol=1e-5)
@@ -32,10 +32,19 @@ class TestCalibrateLaser:
             [1.0, 2.0, 1.0],
             [2.0, 1.0, 2.0],
             [3.0, 3.0, 3.0],
-        ])
+        ], dtype=np.float32)
         _, orientation = calibrate_laser(points)
         assert orientation.shape == (3,)
         np.testing.assert_allclose(np.linalg.norm(orientation), 1.0, atol=1e-5)
+
+    def test_accepts_float32_input(self):
+        """Regression: the documented contract is float32 — the binding must accept it."""
+        points = np.array([[0.0, 0.0, 1.0], [0.0, 0.0, 2.0]], dtype=np.float32)
+        origin, orientation = calibrate_laser(points)
+        assert origin.shape == (3,)
+        assert orientation.shape == (3,)
+        assert np.issubdtype(origin.dtype, np.floating)
+        assert np.issubdtype(orientation.dtype, np.floating)
 
 
 # ---------------------------------------------------------------------------
