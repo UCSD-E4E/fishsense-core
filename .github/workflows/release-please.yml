@@ -12,8 +12,32 @@ permissions:
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs['rust/fishsense-core--release_created'] }}
+      tag_name: ${{ steps.release.outputs['rust/fishsense-core--tag_name'] }}
     steps:
       - uses: googleapis/release-please-action@v4
+        id: release
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+  build-wheel:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --strip --manifest-path python/fishsense_core/Cargo.toml --out target/wheels --find-interpreter
+          target: x86_64-unknown-linux-gnu
+          manylinux: 2_28
+          before-script-linux: |
+            dnf install -y llvm-devel clang-devel opencv-devel openblas-devel
+      - name: Upload wheel to release
+        run: gh release upload "${{ needs.release-please.outputs.tag_name }}" target/wheels/*.whl
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
