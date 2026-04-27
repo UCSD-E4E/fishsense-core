@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v1.6.0...fishsense_core-v1.7.0) (2026-04-27)
+
+
+### Features
+
+* expose snap to depth for python testing ([b901d74](https://github.com/UCSD-E4E/fishsense-core/commit/b901d74cc0e643fa7e8186db1b50412bb2f47199))
+
 ## [1.6.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v1.5.0...fishsense_core-v1.6.0) (2026-04-27)
 
 
