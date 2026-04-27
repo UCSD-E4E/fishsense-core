@@ -4,6 +4,13 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to upload wheels to (e.g. fishsense-core-v1.7.0). Leave blank for the normal release-please flow."
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -11,6 +18,7 @@ permissions:
 
 jobs:
   release-please:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
       release_created: ${{ steps.release.outputs['rust/fishsense-core--release_created'] }}
@@ -24,7 +32,11 @@ jobs:
 
   build-wheel:
     needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
+    if: |
+      always() && (
+        needs.release-please.outputs.release_created == 'true' ||
+        (github.event_name == 'workflow_dispatch' && inputs.tag != '')
+      )
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -36,8 +48,9 @@ jobs:
           target: x86_64-unknown-linux-gnu
           manylinux: 2_28
           before-script-linux: |
-            dnf install -y llvm-devel clang-devel opencv-devel openblas-devel
+            dnf install -y llvm-devel clang-devel opencv-devel openblas-devel openssl-devel
       - name: Upload wheel to release
-        run: gh release upload "${{ needs.release-please.outputs.tag_name }}" target/wheels/*.whl
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag != '' && inputs.tag || needs.release-please.outputs.tag_name }}
+        run: gh release upload "$TAG" target/wheels/*.whl
