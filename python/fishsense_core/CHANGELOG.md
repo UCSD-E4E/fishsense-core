@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.6.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v1.5.0...fishsense_core-v1.6.0) (2026-04-27)
+
+
+### Features
+
+* bind WorldPointHandler to Python with project + laser triangulation ([ce5a863](https://github.com/UCSD-E4E/fishsense-core/commit/ce5a863039baf8c0dbc92f1d67cddc39d5ea76c2))
+
+
+### Bug Fixes
+
+* accept float32 in calibrate_laser PyO3 binding ([fc4b394](https://github.com/UCSD-E4E/fishsense-core/commit/fc4b39456f2823dc1f17b28d781a66889efa4291))
+* coerce WorldPointHandler inputs to float64 in the Python wrapper ([b813662](https://github.com/UCSD-E4E/fishsense-core/commit/b81366265f0255371eff9ba3341d80ba37aca479))
+
 ## [1.5.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v1.4.1...fishsense_core-v1.5.0) (2026-04-26)
 
 
