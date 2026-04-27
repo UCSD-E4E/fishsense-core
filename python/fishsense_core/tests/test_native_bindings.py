@@ -148,6 +148,32 @@ class TestFishHeadTailDetector:
         with pytest.raises(ValueError):
             detector.find_head_tail_img(np.zeros((5, 5, 3), dtype=np.uint8))
 
+    def test_snap_to_depth_map_snaps_to_midpoint_component(self):
+        """Endpoints land in the connected depth component containing the midpoint."""
+        detector = FishHeadTailDetector()
+        # Two flat depth regions split at column 2; the midpoint at (2, 2) sits
+        # in the right (depth 1.0) component, so both endpoints snap there.
+        depth = np.full((5, 5), 1.0, dtype=np.float32)
+        depth[:, :2] = 5.0
+        left = np.array([0.0, 2.0], dtype=np.float32)
+        right = np.array([4.0, 2.0], dtype=np.float32)
+
+        snapped_left, snapped_right = detector.snap_to_depth_map(depth, left, right)
+
+        assert snapped_left.shape == (2,) and snapped_left.dtype == np.float32
+        assert snapped_right.shape == (2,) and snapped_right.dtype == np.float32
+        # left was outside the right component → snaps onto its boundary at x=2.
+        np.testing.assert_allclose(snapped_left, [2.0, 2.0])
+        # right was already in the component → unchanged.
+        np.testing.assert_allclose(snapped_right, [4.0, 2.0])
+
+    def test_snap_to_depth_map_rejects_wrong_length_coord(self):
+        detector = FishHeadTailDetector()
+        depth = np.zeros((4, 4), dtype=np.float32)
+        good = np.array([0.0, 0.0], dtype=np.float32)
+        with pytest.raises(ValueError):
+            detector.snap_to_depth_map(depth, np.array([0.0, 0.0, 0.0], dtype=np.float32), good)
+
 
 # ---------------------------------------------------------------------------
 # FishSegmentation
