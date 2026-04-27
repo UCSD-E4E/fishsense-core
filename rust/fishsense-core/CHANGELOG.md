@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.6.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v1.5.0...fishsense-core-v1.6.0) (2026-04-27)
+
+
+### Features
+
+* bind WorldPointHandler to Python with project + laser triangulation ([ce5a863](https://github.com/UCSD-E4E/fishsense-core/commit/ce5a863039baf8c0dbc92f1d67cddc39d5ea76c2))
+
+
+### Bug Fixes
+
+* drop post-snap mask-overlap fallback in find_head_tail_depth ([fa47ba6](https://github.com/UCSD-E4E/fishsense-core/commit/fa47ba6852aee91e89b21a74b6610847760e4869))
+* guard find_head_tail_depth against depth-discontinuity collapse ([1cd5f99](https://github.com/UCSD-E4E/fishsense-core/commit/1cd5f991c39ff2c3e18e7da3aa562c45eb797c41))
+
 ## [1.5.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v1.4.1...fishsense-core-v1.5.0) (2026-04-26)
 
 
