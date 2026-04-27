@@ -65,9 +65,15 @@ class TestWorldPointHandler:
         return WorldPointHandler(np.eye(3))
 
     def test_project_image_point_int_input(self):
-        """Regression: int-dtype image_point must not raise."""
+        """Regression: int-dtype image_point must not raise.
+
+        Also pins the wrapper's output dtype to float64 — the native binding
+        returns f64 today and downstream callers shouldn't have to defend
+        against a silent precision change.
+        """
         result = self._identity().project_image_point(np.array([100, 200]))
         assert result.shape == (3,)
+        assert result.dtype == np.float64
         np.testing.assert_allclose(result, [100.0, 200.0, 1.0])
 
     def test_project_image_point_float64_input(self):
@@ -101,6 +107,12 @@ class TestWorldPointHandler:
         """K_inv passed as ints (e.g. np.eye default int dtype after astype) must work."""
         h = WorldPointHandler(np.eye(3, dtype=np.int64))
         assert h is not None
+
+    def test_constructor_python_list_of_lists(self):
+        """K_inv passed as a plain list-of-lists must work — np.asarray handles it."""
+        h = WorldPointHandler([[1, 0, 0], [0, 1, 0], [0, 0, 1]])
+        result = h.project_image_point([3, 4])
+        np.testing.assert_allclose(result, [3.0, 4.0, 1.0])
 
 
 # ---------------------------------------------------------------------------
