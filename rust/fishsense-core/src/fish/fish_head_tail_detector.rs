@@ -146,10 +146,6 @@ impl FishHeadTailDetector {
     /// 2. Those coords are rescaled into the depth grid so `snap_to_depth_map`
     ///    can run nearest-neighbour against depth-grid pixels.
     /// 3. The snapped depth-grid endpoints are rescaled back into mask space.
-    /// 4. The snapped endpoints are validated against the input `mask`: any
-    ///    snapped endpoint that falls outside the mask is replaced with its
-    ///    pre-snap (geometry-refined) value. This catches cases where the
-    ///    snap pulls an endpoint into a neighbouring object.
     ///
     /// Returns `HeadTailCoords` in **mask space** — the same coordinate space
     /// as the input mask, so the result drops directly into anything that
@@ -165,6 +161,20 @@ impl FishHeadTailDetector {
     /// corner whenever the mask was higher-resolution than the depth map —
     /// the standard iOS ARKit configuration (~1920×1440 RGB mask alongside
     /// 256×192 LiDAR depth).
+    ///
+    /// Snap reliability: when the depth component containing the BFS
+    /// midpoint has fewer than `MIN_COMPONENT_SIZE` pixels, the snap is
+    /// short-circuited inside `snap_to_depth_map` and the geometry-refined
+    /// endpoints are returned unchanged. There is no per-endpoint
+    /// post-snap mask-overlap fallback — it was added in commit 1cd5f99
+    /// alongside the degeneracy guard but, on a 519-fish CCFRP diagnostic,
+    /// fired on 248 frames and made things worse on average (ratio std
+    /// rose 0.135 → 0.152, two new severe overshoots including one at
+    /// 3.27× truth). The depth-RGB sensor offset on iOS routinely places
+    /// the fish-depth surface 1–10 px outside the RGB mask silhouette, so
+    /// the validation rejected snaps that were genuinely doing useful
+    /// work. See `tests/fixtures/head_tail_overshoot/case_06_*` for the
+    /// motivating regression.
     #[instrument(skip(self, mask, depth_map), fields(height = mask.dim().0, width = mask.dim().1))]
     pub async fn find_head_tail_depth(
         &self,
@@ -186,37 +196,8 @@ impl FishHeadTailDetector {
             .snap_to_depth_map(depth_map, &head_d, &tail_d)
             .await?;
 
-        let snapped_head = scale_depth_to_image(&snapped.left, mask_dim, depth_dim);
-        let snapped_tail = scale_depth_to_image(&snapped.right, mask_dim, depth_dim);
-
-        // ── Stage 4: Mask-bounded validation ────────────────────────────────
-        // If the snap pushed an endpoint to a depth pixel that doesn't
-        // overlap the fish mask at all, fall back to the pre-snap
-        // (geometry-refined) coordinate for that endpoint. The check is at
-        // depth-grid resolution because that's the grid the snap operates
-        // on — a snap landing inside a depth pixel that covers any mask
-        // pixel is acceptable. Mask-space pixel-precision checks are too
-        // strict: PCA endpoints can sit exactly on the silhouette edge.
-        let head =
-            if pixel_inside_mask_at_depth_grid(mask, &snapped_head, mask_dim, depth_dim) {
-                snapped_head
-            } else {
-                warn!(
-                    snapped_x = snapped_head.0[0], snapped_y = snapped_head.0[1],
-                    "snapped head fell outside mask; reverting to pre-snap endpoint"
-                );
-                coords.head
-            };
-        let tail =
-            if pixel_inside_mask_at_depth_grid(mask, &snapped_tail, mask_dim, depth_dim) {
-                snapped_tail
-            } else {
-                warn!(
-                    snapped_x = snapped_tail.0[0], snapped_y = snapped_tail.0[1],
-                    "snapped tail fell outside mask; reverting to pre-snap endpoint"
-                );
-                coords.tail
-            };
+        let head = scale_depth_to_image(&snapped.left, mask_dim, depth_dim);
+        let tail = scale_depth_to_image(&snapped.right, mask_dim, depth_dim);
 
         debug!(
             head_x = head.0[0], head_y = head.0[1],
@@ -380,12 +361,13 @@ fn pixel_inside_mask(mask: &Array2<u8>, coord: &ImageCoord) -> bool {
 /// neighbour-downsampled mask at the depth-grid pixel — but computed
 /// directly from the mask without materialising a resized copy.
 ///
-/// This is the mask-bounded check `snap_to_depth_map` should satisfy:
-/// the snap operates at depth-grid resolution, so a snap landing on a
-/// depth pixel that overlaps the fish silhouette is acceptable, even
-/// if the mask-space coordinate happens to fall just outside the
-/// mask's pixel boundary (a common artefact of geometry-refined PCA
-/// endpoints sitting exactly on the silhouette edge).
+/// Used by tests to assert that endpoints from `find_head_tail_depth`
+/// land on the fish silhouette at depth-grid resolution. Was previously
+/// a production gate in stage 4 of `find_head_tail_depth`; that gate
+/// was removed because depth-RGB misregistration on iOS made the check
+/// reject snaps that were doing useful work (see the docstring on
+/// `find_head_tail_depth`).
+#[cfg(test)]
 fn pixel_inside_mask_at_depth_grid(
     mask: &Array2<u8>,
     coord: &ImageCoord,
@@ -1520,6 +1502,98 @@ mod tests {
         assert!(
             tail_diff <= TOL_PX,
             "tail {tail:?} drifted {tail_diff:.1} px from v1.5.0 baseline (tol {TOL_PX} px)"
+        );
+    }
+
+    // ── Post-snap mask-overlap fallback overcorrection (1cd5f99 regression) ──
+    //
+    // Commit 1cd5f99 (v1.5.0) added a stage-4 fallback in
+    // `find_head_tail_depth`: any post-snap endpoint whose depth-grid
+    // pixel didn't overlap the mask was reverted to its pre-snap
+    // (geometry-refined) value. On a 519-fish CCFRP diagnostic that
+    // fallback fired on 248 frames and, on aggregate, made things
+    // worse: ratio std rose 0.135 → 0.152 and two new severe overshoots
+    // appeared (one at 3.27× truth). The fallback was removed; this
+    // fixture is the headline regression case from that diagnostic.
+    //
+    // Anchors (post-1cd5f99 with the fallback in place — the pathology):
+    //   snout (412.5, 450.0)   fork (1855.1, 897.98)
+    //   measured 1.198 m vs truth 0.367 m (ratio 3.27)
+    // Anchors (pre-1cd5f99 v1.5.0 / post-fallback-revert — expected):
+    //   snout (412.5, 450.0)   fork (1792.5, 870.0)
+    //   measured 0.334 m vs truth 0.367 m (ratio 0.91)
+
+    /// On `case_06`, the depth component containing the BFS midpoint
+    /// (size 20073 px) is over 2× the mask area in depth-grid space
+    /// (9425 px) — the ARKit depth surface bleeds 11226 px past the
+    /// fish silhouette into background at the same depth. The snap
+    /// pulls the fork into a fish-depth pixel near the silhouette;
+    /// that target pixel's mask-rectangle is empty, so the 1cd5f99
+    /// fallback rejected the snap and reverted to the pre-snap fork
+    /// at depth 1.227 m (background) — yielding a 3.27× overshoot.
+    /// Without the fallback, the fork lands on the depth surface at
+    /// 0.374 m and the ratio returns to ~0.91, matching pre-1cd5f99.
+    #[tokio::test]
+    async fn test_find_head_tail_depth_overshoot_case_06_no_fallback_revert() {
+        use ndarray_npy::read_npy;
+        use std::path::PathBuf;
+
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/head_tail_overshoot/case_06_validation_rejects_helpful_snap");
+        let mask: Array2<u8> = read_npy(dir.join("mask.npy")).expect("mask.npy load");
+        let depth: Array2<f32> =
+            read_npy(dir.join("depth_map.npy")).expect("depth_map.npy load");
+        let depth_map = DepthMap(depth);
+
+        let detector = FishHeadTailDetector {};
+        let coords = detector
+            .find_head_tail_depth(&mask, &depth_map)
+            .await
+            .expect("detector must succeed on case_06");
+
+        let snout = [coords.head.0[0], coords.head.0[1]];
+        let fork = [coords.tail.0[0], coords.tail.0[1]];
+        // find_head_tail_img orientation can return head/tail in either
+        // role — sort by x to recover snout (left) / fork (right).
+        let (snout, fork) = if snout[0] < fork[0] { (snout, fork) } else { (fork, snout) };
+
+        let dist = |a: [f32; 2], b: [f32; 2]| -> f32 {
+            ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt()
+        };
+
+        // Pre-1cd5f99 v1.5.0 snap result (the regression target).
+        let expected_snout = [412.5_f32, 450.0];
+        let expected_fork = [1792.5_f32, 870.0];
+        // Post-1cd5f99 fallback-reverted fork — must NOT match this.
+        let regressed_fork = [1855.1455_f32, 897.9772];
+
+        const TOL_PX: f32 = 10.0;
+
+        assert!(
+            dist(snout, expected_snout) <= TOL_PX,
+            "snout {snout:?} drifted {:.1} px from v1.5.0 snap target {expected_snout:?} \
+             (tol {TOL_PX} px)",
+            dist(snout, expected_snout)
+        );
+
+        // The fork must land on the snap target, not be reverted to the
+        // pre-snap geometry-refined point. A reverted fork was the 1cd5f99
+        // pathology: it lands on a 1.23 m depth pixel and the unprojected
+        // length blows up to 3.27× truth.
+        let fork_to_target = dist(fork, expected_fork);
+        let fork_to_regressed = dist(fork, regressed_fork);
+        assert!(
+            fork_to_target <= TOL_PX,
+            "fork {fork:?} is {fork_to_target:.1} px from v1.5.0 snap target \
+             {expected_fork:?} (tol {TOL_PX} px). If it is near {regressed_fork:?} \
+             ({fork_to_regressed:.1} px), the post-snap mask-overlap fallback has \
+             returned and is reverting useful snaps."
+        );
+        assert!(
+            fork_to_regressed > TOL_PX,
+            "fork {fork:?} is within {TOL_PX} px of the 1cd5f99 fallback target \
+             {regressed_fork:?} — the mask-overlap fallback is firing and reverting \
+             the snap to a depth-discontinuity pixel."
         );
     }
 }

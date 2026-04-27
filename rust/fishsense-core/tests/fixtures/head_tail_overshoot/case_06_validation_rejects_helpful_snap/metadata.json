@@ -1,0 +1,56 @@
+{
+  "timestamp": 1751572937,
+  "device": "iPad",
+  "category": "post_fix_overshoot",
+  "notes": "In v1.5.0 + 1cd5f991, the mask-overlap fallback rejects the post-snap fork and falls back to the pre-snap (find_head_tail_img) fork. The pre-snap fork lies on a depth-discontinuity pixel where depth_map = 1.227 m, while the rest of the fish is at ~0.37 m. Length blows up: ratio 0.91 (pre-fix snapped) -> 3.27 (post-fix unsnapped). The snap was actually doing useful work here; the new fallback overcorrects.",
+  "rgb_shape_hw": [
+    1440,
+    1920
+  ],
+  "depth_shape_hw": [
+    192,
+    256
+  ],
+  "epsilon_used": 0.005,
+  "fishsense_core_commit": "1cd5f991",
+  "observed": {
+    "find_head_tail_img": {
+      "snout_xy": [
+        403.709716796875,
+        439.9771728515625
+      ],
+      "fork_xy": [
+        1855.1455078125,
+        897.9771728515625
+      ]
+    },
+    "find_head_tail_depth": {
+      "snout_xy": [
+        412.5,
+        450.0
+      ],
+      "fork_xy": [
+        1855.1455078125,
+        897.9771728515625
+      ],
+      "coordinate_space": "mask (RGB) pixels"
+    }
+  },
+  "depth_lookups_m": {
+    "pre_snap_snout": 0.473388671875,
+    "pre_snap_fork": 1.2265625,
+    "post_snap_snout": 0.36865234375,
+    "post_snap_fork": 1.2265625
+  },
+  "midpoint_in_depth_grid": [
+    151,
+    89
+  ],
+  "depth_at_midpoint_m": 0.40771484375,
+  "component_size_at_midpoint": 20073,
+  "mask_area_in_depth_grid_px": 9425,
+  "snap_drift_from_pre_to_post": {
+    "snout_px": 13.33139705657959,
+    "fork_px": 0.0
+  }
+}
