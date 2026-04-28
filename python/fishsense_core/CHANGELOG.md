@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.7.1](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v1.7.0...fishsense_core-v1.7.1) (2026-04-28)
+
+
+### Bug Fixes
+
+* RawImage from bytes + Image.to_jpeg_bytes ([988db4d](https://github.com/UCSD-E4E/fishsense-core/commit/988db4d8e240349b6b2d2c6496c4d2c879b3d375))
+* support in-memory bytes for RawImage and add Image.to_jpeg_bytes ([53cac91](https://github.com/UCSD-E4E/fishsense-core/commit/53cac91af080c6f25b07fdb888625c473146c19e))
+
 ## [1.7.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v1.6.0...fishsense_core-v1.7.0) (2026-04-27)
 
 
