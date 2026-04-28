@@ -2,6 +2,7 @@
 
 from unittest.mock import MagicMock, patch
 
+import cv2
 import numpy as np
 import pytest
 
@@ -73,6 +74,50 @@ class TestImage:
         """Image cannot be instantiated directly."""
         with pytest.raises(TypeError):
             Image()  # type: ignore[abstract]
+
+    def test_to_jpeg_bytes_round_trip(self):
+        """to_jpeg_bytes must produce bytes that decode to the original shape."""
+        rng = np.random.default_rng(seed=42)
+        data = rng.integers(0, 256, size=(64, 96, 3), dtype=np.uint8)
+        img = _StubImage(data)
+
+        jpeg = img.to_jpeg_bytes()
+
+        assert isinstance(jpeg, bytes)
+        assert len(jpeg) > 0
+        decoded = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+        assert decoded is not None
+        assert decoded.shape == data.shape
+
+    def test_to_jpeg_bytes_quality_is_wired(self):
+        """Lower quality must yield strictly smaller output on a non-trivial image."""
+        rng = np.random.default_rng(seed=7)
+        data = rng.integers(0, 256, size=(256, 256, 3), dtype=np.uint8)
+        img = _StubImage(data)
+
+        high_quality = img.to_jpeg_bytes(quality=95)
+        low_quality = img.to_jpeg_bytes(quality=20)
+
+        assert len(low_quality) < len(high_quality)
+
+    def test_to_jpeg_bytes_default_quality(self):
+        """Default quality must match an explicit quality=95 call."""
+        rng = np.random.default_rng(seed=11)
+        data = rng.integers(0, 256, size=(48, 48, 3), dtype=np.uint8)
+        img = _StubImage(data)
+
+        assert img.to_jpeg_bytes() == img.to_jpeg_bytes(quality=95)
+
+    def test_to_jpeg_bytes_raises_on_failure(self):
+        """If cv2.imencode reports failure, to_jpeg_bytes must raise RuntimeError."""
+        data = np.zeros((4, 4, 3), dtype=np.uint8)
+        img = _StubImage(data)
+        with patch(
+            "fishsense_core.image.image.cv2.imencode",
+            return_value=(False, np.array([], dtype=np.uint8)),
+        ):
+            with pytest.raises(RuntimeError):
+                img.to_jpeg_bytes()
 
 
 # ---------------------------------------------------------------------------

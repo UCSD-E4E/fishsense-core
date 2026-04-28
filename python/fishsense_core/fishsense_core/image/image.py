@@ -58,3 +58,12 @@ class Image(ABC):
         """Saves the image to the specified file path."""
         _log.debug("%s: saving image to %s", type(self).__name__, path)
         cv2.imwrite(path, self.data)
+
+    def to_jpeg_bytes(self, quality: int = 95) -> bytes:
+        """Encodes the image as JPEG and returns the raw bytes."""
+        success, encoded = cv2.imencode(
+            ".jpg", self.data, [cv2.IMWRITE_JPEG_QUALITY, quality]
+        )
+        if not success:
+            raise RuntimeError("cv2.imencode failed")
+        return encoded.tobytes()
