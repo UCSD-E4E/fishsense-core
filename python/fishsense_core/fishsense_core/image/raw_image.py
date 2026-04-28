@@ -1,7 +1,9 @@
 """FishSense Core Package"""
 
+import io
 import logging
 import math
+from contextlib import contextmanager
 from pathlib import Path
 
 import cv2
@@ -16,19 +18,31 @@ _log = logging.getLogger(__name__)
 
 
 class RawImage(Image):
-    """Represents a raw image loaded from a file path."""
+    """Represents a raw image loaded from a file path or in-memory bytes."""
 
     # pylint: disable=no-member
 
-    def __init__(self, path: Path):
-        self.__path = path
+    def __init__(self, source: Path | bytes):
+        self.__source = source
 
         super().__init__()
 
+    @contextmanager
+    def __open_source(self):
+        if isinstance(self.__source, (bytes, bytearray, memoryview)):
+            yield io.BytesIO(self.__source)
+        else:
+            with self.__source.open("rb") as f:
+                yield f
+
     def _get_data(self) -> np.ndarray:
-        """Loads the raw image from the file path and processes it."""
-        _log.debug("loading raw image: %s", self.__path)
-        with self.__path.open("rb") as f:
+        """Loads the raw image and processes it."""
+        if isinstance(self.__source, (bytes, bytearray, memoryview)):
+            _log.debug("loading raw image from %d bytes", len(self.__source))
+        else:
+            _log.debug("loading raw image: %s", self.__source)
+
+        with self.__open_source() as f:
             with rawpy.imread(f) as raw:
                 img = img_as_float(
                     raw.postprocess(
