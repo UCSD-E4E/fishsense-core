@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.0.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v1.7.1...fishsense-core-v2.0.0) (2026-04-29)
+
+
+### ⚠ BREAKING CHANGES
+
+* `FishHeadTailDetector::snap_to_depth_map` and `find_head_tail_depth` are gone; callers needing per-keypoint depth should use `predict_keypoint_depths(depth_map, mask, k_inv, snout_xy, fork_xy)` instead. `spatial::connected_components`, `gpu`, and
+
+### Features
+
+* replace depth-snap with mask-bounded RANSAC plane-fit ([efdfbfa](https://github.com/UCSD-E4E/fishsense-core/commit/efdfbfaa32b72a45719995954d940d2d5fb14632))
+
 ## [1.7.1](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v1.7.0...fishsense-core-v1.7.1) (2026-04-28)
 
 
