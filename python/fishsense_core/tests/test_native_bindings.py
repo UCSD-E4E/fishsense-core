@@ -148,31 +148,59 @@ class TestFishHeadTailDetector:
         with pytest.raises(ValueError):
             detector.find_head_tail_img(np.zeros((5, 5, 3), dtype=np.uint8))
 
-    def test_snap_to_depth_map_snaps_to_midpoint_component(self):
-        """Endpoints land in the connected depth component containing the midpoint."""
+    def test_predict_keypoint_depths_uniform_plane(self):
+        """Frontoparallel scene → both keypoints recover the scene depth."""
         detector = FishHeadTailDetector()
-        # Two flat depth regions split at column 2; the midpoint at (2, 2) sits
-        # in the right (depth 1.0) component, so both endpoints snap there.
-        depth = np.full((5, 5), 1.0, dtype=np.float32)
-        depth[:, :2] = 5.0
-        left = np.array([0.0, 2.0], dtype=np.float32)
-        right = np.array([4.0, 2.0], dtype=np.float32)
+        depth_value = np.float32(0.5)
+        mask = np.zeros((40, 60), dtype=np.uint8)
+        mask[10:30, 5:55] = 1
+        depth = np.full((40, 60), depth_value, dtype=np.float32)
+        k_inv = np.eye(3, dtype=np.float32)
+        snout = np.array([10.0, 20.0], dtype=np.float32)
+        fork = np.array([50.0, 20.0], dtype=np.float32)
 
-        snapped_left, snapped_right = detector.snap_to_depth_map(depth, left, right)
+        snout_d, fork_d = detector.predict_keypoint_depths(mask, depth, k_inv, snout, fork)
 
-        assert snapped_left.shape == (2,) and snapped_left.dtype == np.float32
-        assert snapped_right.shape == (2,) and snapped_right.dtype == np.float32
-        # left was outside the right component → snaps onto its boundary at x=2.
-        np.testing.assert_allclose(snapped_left, [2.0, 2.0])
-        # right was already in the component → unchanged.
-        np.testing.assert_allclose(snapped_right, [4.0, 2.0])
+        assert isinstance(snout_d, float) and isinstance(fork_d, float)
+        np.testing.assert_allclose(snout_d, depth_value, atol=1e-3)
+        np.testing.assert_allclose(fork_d, depth_value, atol=1e-3)
 
-    def test_snap_to_depth_map_rejects_wrong_length_coord(self):
+    def test_predict_keypoint_depths_rejects_wrong_length_keypoint(self):
+        """Snout/fork must be length-2 [x, y] arrays."""
         detector = FishHeadTailDetector()
-        depth = np.zeros((4, 4), dtype=np.float32)
-        good = np.array([0.0, 0.0], dtype=np.float32)
+        mask = np.ones((4, 4), dtype=np.uint8)
+        depth = np.full((4, 4), 1.0, dtype=np.float32)
+        k_inv = np.eye(3, dtype=np.float32)
+        snout = np.array([1.0, 1.0, 1.0], dtype=np.float32)
+        fork = np.array([2.0, 2.0], dtype=np.float32)
         with pytest.raises(ValueError):
-            detector.snap_to_depth_map(depth, np.array([0.0, 0.0, 0.0], dtype=np.float32), good)
+            detector.predict_keypoint_depths(mask, depth, k_inv, snout, fork)
+
+    def test_predict_keypoint_depths_rejects_non_3x3_k_inv(self):
+        """K_inv must be 3×3 — bad shape surfaces as ValueError, not panic."""
+        detector = FishHeadTailDetector()
+        mask = np.ones((4, 4), dtype=np.uint8)
+        depth = np.full((4, 4), 1.0, dtype=np.float32)
+        bad_k = np.zeros((2, 3), dtype=np.float32)
+        snout = np.array([1.0, 1.0], dtype=np.float32)
+        fork = np.array([2.0, 2.0], dtype=np.float32)
+        with pytest.raises(ValueError):
+            detector.predict_keypoint_depths(mask, depth, bad_k, snout, fork)
+
+    def test_predict_keypoint_depths_is_deterministic(self):
+        """Seeded RANSAC → identical depths across repeated calls."""
+        detector = FishHeadTailDetector()
+        rng = np.random.default_rng(0)
+        depth = (0.5 + 0.001 * rng.standard_normal((40, 60))).astype(np.float32)
+        mask = np.zeros((40, 60), dtype=np.uint8)
+        mask[10:30, 5:55] = 1
+        k_inv = np.eye(3, dtype=np.float32)
+        snout = np.array([10.0, 20.0], dtype=np.float32)
+        fork = np.array([50.0, 20.0], dtype=np.float32)
+
+        a = detector.predict_keypoint_depths(mask, depth, k_inv, snout, fork)
+        b = detector.predict_keypoint_depths(mask, depth, k_inv, snout, fork)
+        assert a == b
 
 
 # ---------------------------------------------------------------------------

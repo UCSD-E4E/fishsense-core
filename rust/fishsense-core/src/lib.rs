@@ -1,6 +1,5 @@
 pub mod errors;
 pub mod fish;
-pub mod gpu;
 pub mod laser;
 pub mod spatial;
 pub mod world_point_handler;

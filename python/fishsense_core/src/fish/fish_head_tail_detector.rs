@@ -1,10 +1,12 @@
 use fishsense_core::fish::fish_head_tail_detector::FishHeadTailDetector as FishHeadTailDetectorRust;
-use fishsense_core::spatial::types::{DepthCoord, DepthMap};
+use fishsense_core::spatial::types::{DepthMap, ImageCoord};
 use ndarray::{Array1, Array2, Ix1, Ix2};
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArrayDyn};
 use pyo3::{exceptions::PyValueError, prelude::*};
 
-fn to_depth_coord(arr: PyReadonlyArrayDyn<'_, f32>, name: &str) -> PyResult<DepthCoord> {
+type HeadTailResult<'py> = PyResult<(Bound<'py, PyArray1<f32>>, Bound<'py, PyArray1<f32>>)>;
+
+fn to_image_coord(arr: PyReadonlyArrayDyn<'_, f32>, name: &str) -> PyResult<ImageCoord> {
     let v: Array1<f32> = arr
         .as_array()
         .to_owned()
@@ -16,10 +18,8 @@ fn to_depth_coord(arr: PyReadonlyArrayDyn<'_, f32>, name: &str) -> PyResult<Dept
             v.len()
         )));
     }
-    Ok(DepthCoord(v))
+    Ok(ImageCoord(v))
 }
-
-type HeadTailResult<'py> = PyResult<(Bound<'py, PyArray1<f32>>, Bound<'py, PyArray1<f32>>)>;
 
 #[pyclass]
 pub struct FishHeadTailDetector {
@@ -54,12 +54,26 @@ impl FishHeadTailDetector {
         Ok((coords.head.0.into_pyarray(py), coords.tail.0.into_pyarray(py)))
     }
 
-    fn find_head_tail_depth<'py>(
+    /// Predict snout and fork depth via a mask-bounded RANSAC plane
+    /// fit in camera 3-D coordinates.
+    ///
+    /// Args:
+    ///     mask: (H, W) uint8 binary fish mask, in RGB grid space.
+    ///     depth_map: (H', W') float32 depth map in metres.
+    ///     k_inv: 3×3 inverse camera intrinsics, RGB grid space.
+    ///     snout_xy, fork_xy: length-2 [x, y] keypoint coordinates,
+    ///         in mask (RGB) space.
+    ///
+    /// Returns:
+    ///     (snout_depth_m, fork_depth_m)
+    fn predict_keypoint_depths(
         &self,
-        py: Python<'py>,
-        mask: PyReadonlyArrayDyn<'py, u8>,
-        depth_map: PyReadonlyArrayDyn<'py, f32>,
-    ) -> HeadTailResult<'py> {
+        mask: PyReadonlyArrayDyn<'_, u8>,
+        depth_map: PyReadonlyArrayDyn<'_, f32>,
+        k_inv: PyReadonlyArrayDyn<'_, f32>,
+        snout_xy: PyReadonlyArrayDyn<'_, f32>,
+        fork_xy: PyReadonlyArrayDyn<'_, f32>,
+    ) -> PyResult<(f32, f32)> {
         let mask_rust: Array2<u8> = mask
             .as_array()
             .to_owned()
@@ -70,35 +84,17 @@ impl FishHeadTailDetector {
             .to_owned()
             .into_dimensionality::<Ix2>()
             .map_err(|e| PyValueError::new_err(format!("expected a 2D (H, W) f32 depth map: {e}")))?;
-        let depth_map_rust = DepthMap(depth_rust);
-
-        let coords = pollster::block_on(self.inner.find_head_tail_depth(&mask_rust, &depth_map_rust))
-            .map_err(|e| PyValueError::new_err(format!("find_head_tail_depth failed: {e}")))?;
-
-        Ok((coords.head.0.into_pyarray(py), coords.tail.0.into_pyarray(py)))
-    }
-
-    fn snap_to_depth_map<'py>(
-        &self,
-        py: Python<'py>,
-        depth_map: PyReadonlyArrayDyn<'py, f32>,
-        left_depth_coord: PyReadonlyArrayDyn<'py, f32>,
-        right_depth_coord: PyReadonlyArrayDyn<'py, f32>,
-    ) -> HeadTailResult<'py> {
-        let depth_rust: Array2<f32> = depth_map
+        let k_inv_rust: Array2<f32> = k_inv
             .as_array()
             .to_owned()
             .into_dimensionality::<Ix2>()
-            .map_err(|e| PyValueError::new_err(format!("expected a 2D (H, W) f32 depth map: {e}")))?;
+            .map_err(|e| PyValueError::new_err(format!("expected a 3x3 f32 k_inv: {e}")))?;
         let depth_map_rust = DepthMap(depth_rust);
-        let left = to_depth_coord(left_depth_coord, "left_depth_coord")?;
-        let right = to_depth_coord(right_depth_coord, "right_depth_coord")?;
+        let snout = to_image_coord(snout_xy, "snout_xy")?;
+        let fork = to_image_coord(fork_xy, "fork_xy")?;
 
-        let snapped = pollster::block_on(
-            self.inner.snap_to_depth_map(&depth_map_rust, &left, &right),
-        )
-        .map_err(|e| PyValueError::new_err(format!("snap_to_depth_map failed: {e}")))?;
-
-        Ok((snapped.left.0.into_pyarray(py), snapped.right.0.into_pyarray(py)))
+        self.inner
+            .predict_keypoint_depths(&depth_map_rust, &mask_rust, &k_inv_rust, &snout, &fork)
+            .map_err(|e| PyValueError::new_err(format!("predict_keypoint_depths failed: {e}")))
     }
 }

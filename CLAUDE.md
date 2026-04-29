@@ -17,16 +17,15 @@ pyproject.toml            # Root uv workspace + fishsense-meta package
 ```
 src/
   errors.rs                        # FishSenseError enum
-  gpu.rs                           # wGPU device/queue acquisition
   world_point_handler.rs           # WorldPointHandler — projects image coords to 3D via K⁻¹
   laser/calibration.rs             # calibrate_laser() — 3D laser origin + orientation
   fish/fish_segmentation.rs        # FishSegmentation — ONNX instance segmentation (FishIAL)
-  fish/fish_head_tail_detector.rs  # FishHeadTailDetector — 3-stage head/tail pipeline
+  fish/fish_head_tail_detector.rs  # FishHeadTailDetector — PCA + geometry head/tail; predict_keypoint_depths method
   fish/fish_length_calculator.rs   # FishLengthCalculator — 3D fish length from depth map
   fish/fish_pca.rs                 # estimate_endpoints() — PCA on fish mask
   fish/fish_geometry.rs            # perimeter extraction, polygon splitting, endpoint correction
-  spatial/connected_components.rs  # connected_components() — GPU compute via wGPU (WGSL)
-  spatial/types.rs                 # ImageCoord, DepthCoord, DepthMap newtypes
+  fish/fish_plane_fit.rs           # predict_keypoint_depths() — mask-bounded RANSAC plane fit + local-median fallback
+  spatial/types.rs                 # ImageCoord, DepthMap newtypes
 ```
 
 ### Python package map
@@ -54,10 +53,6 @@ The Python package exposes Rust functions through `fishsense_core._native`. New 
 
 `build.rs` downloads the FishIAL model from HuggingFace at compile time and embeds it with `include_bytes!`. No network access is needed at runtime. The model is a Mask R-CNN variant; score threshold = 0.3, mask threshold = 0.5.
 
-## GPU compute (spatial)
-
-`spatial/connected_components.rs` uses wGPU with inline WGSL shaders. The async `connected_components(depth_map, epsilon)` function acquires a GPU device via `gpu::get_device_and_queue()`. Tests that exercise this path require a GPU.
-
 ## Build commands
 
 **Rust**
@@ -65,10 +60,7 @@ The Python package exposes Rust functions through `fishsense_core._native`. New 
 cargo build            # build all workspace members
 cargo test             # run Rust unit tests
 cargo clippy --all-targets --all-features -- -D warnings   # lint (CI standard)
-naga rust/fishsense-core/src/spatial/connected_components.wgsl   # validate WGSL shader
 ```
-
-Install `naga-cli` with `cargo install naga-cli` before running the shader validator.
 
 **Python (uv)** — run from `python/fishsense_core/`
 ```bash
@@ -85,7 +77,7 @@ uv run pylint fishsense_core/**/*.py   # lint
 
 | File | Trigger | Purpose |
 |---|---|---|
-| `.github/workflows/rust.yml` | every push | clippy → WGSL validation (naga-cli) → build → test |
+| `.github/workflows/rust.yml` | every push | clippy → build → test |
 | `.github/workflows/python.yml` | every push | pylint (3.12) + pytest (3.13, 3.14) |
 | `.github/workflows/maturin.yml` | every push | maturin wheel build check on Linux, Windows, macOS |
 | `.github/workflows/release-please.yml` | push to main | opens a version-bump PR from conventional commits |
