@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.1.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v2.0.0...fishsense-core-v2.1.0) (2026-05-06)
+
+
+### Features
+
+* add CUDA execution provider for fish segmentation ([fe7724f](https://github.com/UCSD-E4E/fishsense-core/commit/fe7724feac85985f87adeebd923db33ae5a3f47f))
+* add CUDA execution provider for fish segmentation ([80229f5](https://github.com/UCSD-E4E/fishsense-core/commit/80229f5a1d1b7bdbb8dacea3f1785814bd974f20))
+* auto-stage ORT CUDA provider libs into the python wheel ([7cb5ea6](https://github.com/UCSD-E4E/fishsense-core/commit/7cb5ea60b5bc5e3452e62fa37fa9dc1d0ab96f37))
+
 ## [2.0.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v1.7.1...fishsense-core-v2.0.0) (2026-04-29)
 
 
