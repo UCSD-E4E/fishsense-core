@@ -8,6 +8,9 @@ edition = "2024"
 name = "fishsense_core"
 crate-type = ["cdylib"]
 
+[features]
+cuda = ["fishsense-core/cuda"]
+
 [dependencies]
 fishsense-core = { path = "../../rust/fishsense-core" }
 ndarray = "0.17.1"
