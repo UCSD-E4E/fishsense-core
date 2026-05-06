@@ -1,7 +1,7 @@
 use std::cmp::{max, min};
 use std::ffi::c_void;
 
-use tracing::{debug, instrument};
+use tracing::{debug, info, instrument, warn};
 
 type InferenceOutputs = (ArrayD<f32>, ArrayD<f32>, ArrayD<f32>);
 
@@ -44,6 +44,27 @@ pub enum SegmentationError {
 pub struct FishSegmentation {
     model_set: bool,
     model: Option<Session>,
+    active_provider: Option<ActiveProvider>,
+}
+
+/// The execution provider that ORT registered for this session — useful for
+/// telling whether a `cuda`-feature build actually got CUDA at runtime, since
+/// ORT silently falls back to CPU when the CUDA libs can't be loaded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActiveProvider {
+    Cpu,
+    Cuda,
+    CoreMl,
+}
+
+impl ActiveProvider {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ActiveProvider::Cpu => "CPU",
+            ActiveProvider::Cuda => "CUDA",
+            ActiveProvider::CoreMl => "CoreML",
+        }
+    }
 }
 
 /// Diagnostic info per Mask R-CNN detection that survived the score threshold.
@@ -79,10 +100,17 @@ impl FishSegmentation {
         FishSegmentation {
             model_set: false,
             model: None,
+            active_provider: None,
         }
     }
 
-    fn create_model() -> Result<Session, ort::Error> {
+    /// Returns the execution provider that was registered when the session
+    /// was created, or `None` if [`load_model`] hasn't been called yet.
+    pub fn active_provider(&self) -> Option<ActiveProvider> {
+        self.active_provider
+    }
+
+    fn build_session_options() -> Result<ort::session::builder::SessionBuilder, ort::Error> {
         let builder = Session::builder()?.with_intra_threads(4)?;
 
         // iOS enforces W^X, which blocks the runtime kernel fusion that
@@ -93,27 +121,67 @@ impl FishSegmentation {
         #[cfg(not(target_os = "ios"))]
         let builder = builder.with_optimization_level(GraphOptimizationLevel::Level3)?;
 
-        #[cfg(feature = "coreml")]
-        let builder = builder.with_execution_providers([
-            ort::execution_providers::CoreMLExecutionProvider::default().build(),
-        ])?;
+        Ok(builder)
+    }
+
+    fn create_model() -> Result<(Session, ActiveProvider), ort::Error> {
+        // Try accelerated EPs first with `error_on_failure` so registration
+        // failures (e.g. missing CUDA libs at runtime) surface here and we
+        // can fall back to CPU explicitly. ORT's default behaviour is to log
+        // a warning and silently continue, which is exactly the silent-CPU
+        // footgun this code path is fixing.
 
         #[cfg(feature = "cuda")]
-        let builder = builder.with_execution_providers([
-            ort::execution_providers::CUDAExecutionProvider::default().build(),
-        ])?;
+        {
+            let builder = Self::build_session_options()?;
+            match builder.with_execution_providers([
+                ort::execution_providers::CUDAExecutionProvider::default()
+                    .build()
+                    .error_on_failure(),
+            ]) {
+                Ok(mut b) => {
+                    info!("ORT registered CUDAExecutionProvider");
+                    return b
+                        .commit_from_memory(MODEL_BYTES)
+                        .map(|s| (s, ActiveProvider::Cuda));
+                }
+                Err(e) => warn!("CUDA EP unavailable, falling back to CPU: {e}"),
+            }
+        }
 
-        let mut builder = builder;
-        builder.commit_from_memory(MODEL_BYTES)
+        #[cfg(feature = "coreml")]
+        {
+            let builder = Self::build_session_options()?;
+            match builder.with_execution_providers([
+                ort::execution_providers::CoreMLExecutionProvider::default()
+                    .build()
+                    .error_on_failure(),
+            ]) {
+                Ok(mut b) => {
+                    info!("ORT registered CoreMLExecutionProvider");
+                    return b
+                        .commit_from_memory(MODEL_BYTES)
+                        .map(|s| (s, ActiveProvider::CoreMl));
+                }
+                Err(e) => warn!("CoreML EP unavailable, falling back to CPU: {e}"),
+            }
+        }
+
+        let mut builder = Self::build_session_options()?;
+        builder
+            .commit_from_memory(MODEL_BYTES)
+            .map(|s| (s, ActiveProvider::Cpu))
     }
 
     #[instrument(skip(self))]
     pub fn load_model(&mut self) -> Result<(), SegmentationError> {
         if !self.model_set {
             debug!("loading embedded ONNX model");
-            self.model = Some(Self::create_model()?);
+            let (session, provider) = Self::create_model()?;
+            self.model = Some(session);
+            self.active_provider = Some(provider);
             self.model_set = true;
-            debug!("model loaded");
+            info!(provider = provider.as_str(), "model loaded");
         } else {
             debug!("model already loaded, skipping");
         }
@@ -855,6 +923,24 @@ mod tests {
         s.load_model().unwrap();
         let result = s.inference(&img).unwrap();
         assert_eq!(result.dim(), (480, 640), "output shape must match input H×W");
+    }
+
+    /// Default-feature builds have no accelerator EP; `active_provider` must
+    /// report CPU after `load_model` and `None` before it. This is the CI-
+    /// friendly counterpart to the GPU-only check that CUDA actually engages.
+    #[test]
+    fn active_provider_defaults_to_cpu() {
+        let mut s = FishSegmentation::new();
+        assert_eq!(s.active_provider(), None, "should be None before load_model");
+        s.load_model().unwrap();
+        // Without any accelerator feature, the only path through create_model
+        // is the CPU fallback.
+        #[cfg(not(any(feature = "cuda", feature = "coreml")))]
+        assert_eq!(s.active_provider(), Some(ActiveProvider::Cpu));
+        // With cuda or coreml enabled the value depends on runtime EP
+        // registration; just assert it's set to *something*.
+        #[cfg(any(feature = "cuda", feature = "coreml"))]
+        assert!(s.active_provider().is_some());
     }
 
     /// Pixel-accurate regression against the reference NPZ fixture.

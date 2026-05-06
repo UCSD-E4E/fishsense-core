@@ -217,3 +217,17 @@ class TestFishSegmentation:
     def test_construct(self):
         seg = FishSegmentation()
         assert seg is not None
+
+    def test_active_provider_none_before_load(self):
+        """`active_provider` must be queryable before `load_model` and return None."""
+        seg = FishSegmentation()
+        assert seg.active_provider() is None
+
+    def test_active_provider_set_after_load(self):
+        """After `load_model`, `active_provider` returns one of the known
+        labels. CI runners are typically CPU-only, but we don't assert "CPU"
+        here so the same test passes in a CUDA-enabled environment."""
+        seg = FishSegmentation()
+        seg.load_model()
+        provider = seg.active_provider()
+        assert provider in {"CPU", "CUDA", "CoreML"}, provider
