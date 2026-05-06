@@ -98,6 +98,11 @@ impl FishSegmentation {
             ort::execution_providers::CoreMLExecutionProvider::default().build(),
         ])?;
 
+        #[cfg(feature = "cuda")]
+        let builder = builder.with_execution_providers([
+            ort::execution_providers::CUDAExecutionProvider::default().build(),
+        ])?;
+
         let mut builder = builder;
         builder.commit_from_memory(MODEL_BYTES)
     }
