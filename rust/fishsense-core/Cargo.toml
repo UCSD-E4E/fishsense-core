@@ -8,7 +8,7 @@ build = "build.rs"
 default = ["download-binaries"]
 download-binaries = ["ort/download-binaries", "ort/tls-rustls"]
 coreml = ["ort/coreml"]
-cuda = ["ort/cuda"]
+cuda = ["ort/cuda", "ort/copy-dylibs"]
 tracing-init = ["dep:tracing-subscriber"]
 
 [dev-dependencies]

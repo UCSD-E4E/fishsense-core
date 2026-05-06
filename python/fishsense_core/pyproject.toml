@@ -4,6 +4,14 @@ build-backend = "maturin"
 
 [tool.maturin]
 module-name = "fishsense_core._native"
+# build.rs stages ORT's dynamic provider libs (CUDA, TensorRT) next to the
+# package source when they're available. They are gitignored (*.so), so list
+# them explicitly here to override that and bundle them into the wheel.
+include = [
+    { path = "fishsense_core/libonnxruntime_providers_*.so", format = "wheel" },
+    { path = "fishsense_core/libonnxruntime_providers_*.dylib", format = "wheel" },
+    { path = "fishsense_core/onnxruntime_providers_*.dll", format = "wheel" },
+]
 
 [project]
 name = "fishsense_core"
