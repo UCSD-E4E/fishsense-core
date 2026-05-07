@@ -24,6 +24,14 @@ impl FishSegmentation {
             .map_err(|e| PyValueError::new_err(format!("load_model failed: {e}")))
     }
 
+    /// Returns the execution provider ORT registered for this session
+    /// (`"CUDA"`, `"CoreML"`, or `"CPU"`), or `None` if `load_model` hasn't
+    /// run yet. Useful for confirming a CUDA-feature wheel actually picked up
+    /// CUDA at runtime instead of silently falling back to CPU.
+    fn active_provider(&self) -> Option<&'static str> {
+        self.inner.active_provider().map(|p| p.as_str())
+    }
+
     fn inference<'py>(
         &mut self,
         py: Python<'py>,
