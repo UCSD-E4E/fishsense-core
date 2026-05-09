@@ -79,8 +79,8 @@ uv run pylint fishsense_core/**/*.py   # lint
 |---|---|---|
 | `.github/workflows/rust.yml` | every push | clippy → build → test |
 | `.github/workflows/python.yml` | every push | pylint (3.12) + pytest (3.13, 3.14) |
-| `.github/workflows/maturin.yml` | every push | maturin wheel build check on Linux, Windows, macOS |
-| `.github/workflows/release-please.yml` | push to main | opens a version-bump PR from conventional commits |
+| `.github/workflows/maturin.yml` | every push | smoke-test wheel build on ubuntu-latest (Linux x86_64 only; output discarded) |
+| `.github/workflows/release-please.yml` | push to main; manual `workflow_dispatch` | opens release PRs and, on merge, builds + uploads manylinux_2_34 wheels to the GitHub Release |
 
 ## Versioning
 
@@ -88,5 +88,8 @@ Versioning is automated with **release-please** and **conventional commits**:
 
 - `fix:` → patch bump, `feat:` → minor bump, `feat!:` / `BREAKING CHANGE:` → major bump
 - `chore:`, `docs:`, `refactor:`, etc. produce no version bump
-- Both `rust/fishsense-core` and `python/fishsense_core` are kept on the same version (`linked-versions: true` in `release-please-config.json`)
-- Merging the release PR creates a GitHub tag, which triggers the maturin CI workflow to publish wheels to PyPI
+- Both `rust/fishsense-core` and `python/fishsense_core` are kept on the same version via the `linked-versions` plugin in `release-please-config.json` (with `merge: false`)
+- Each version bump produces **two** GitHub Releases: `fishsense-core-v<X.Y.Z>` (rust crate) and `fishsense_core-v<X.Y.Z>` (python package). Mind the hyphen vs. underscore.
+- The wheel-upload job in `release-please.yml` reads the `rust/fishsense-core--tag_name` output and attaches wheels to the **hyphen-form** release (`fishsense-core-v<X.Y.Z>`); the underscore-form release stays empty.
+- Wheels published: cp312 / cp313 / cp314 manylinux_2_34 x86_64. No Windows, macOS, or aarch64 wheels. No PyPI publish — wheels live only as GitHub Release assets.
+- Manual rebuild for an existing tag: trigger `release-please.yml` via `workflow_dispatch` and pass the tag name (e.g. `fishsense-core-v2.1.1`).
