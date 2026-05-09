@@ -1,5 +1,15 @@
 # Changelog
 
+## [2.1.1](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v2.1.0...fishsense-core-v2.1.1) (2026-05-09)
+
+
+### Bug Fixes
+
+* enable openblas-src rustls feature so openblas-build 0.10.16 compiles ([798e70e](https://github.com/UCSD-E4E/fishsense-core/commit/798e70ee544a21e140021e63bdb52c547424f88e))
+* enable openblas-src rustls feature so openblas-build 0.10.16 compiles ([fa7da32](https://github.com/UCSD-E4E/fishsense-core/commit/fa7da32d27f2fd66502e4b4603cdea22e1fd02e6))
+* preload nvidia CUDA libs and expose active EP ([932c9d6](https://github.com/UCSD-E4E/fishsense-core/commit/932c9d6e01df3c2c5494abfedcb933aa74964013))
+* preload nvidia CUDA libs and expose active execution provider ([eb0f0de](https://github.com/UCSD-E4E/fishsense-core/commit/eb0f0deaa28c42709c4f5df290b4765497feaf51))
+
 ## [2.1.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v2.0.0...fishsense-core-v2.1.0) (2026-05-06)
 
 
