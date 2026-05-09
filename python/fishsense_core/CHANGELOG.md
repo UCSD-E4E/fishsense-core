@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.1.1](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v2.1.0...fishsense_core-v2.1.1) (2026-05-09)
+
+
+### Bug Fixes
+
+* preload nvidia CUDA libs and expose active EP ([932c9d6](https://github.com/UCSD-E4E/fishsense-core/commit/932c9d6e01df3c2c5494abfedcb933aa74964013))
+* preload nvidia CUDA libs and expose active execution provider ([eb0f0de](https://github.com/UCSD-E4E/fishsense-core/commit/eb0f0deaa28c42709c4f5df290b4765497feaf51))
+
 ## [2.1.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v2.0.0...fishsense_core-v2.1.0) (2026-05-06)
 
 
