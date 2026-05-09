@@ -27,6 +27,12 @@ geo = "0.29"
 nalgebra = "0.33"
 ndarray = "0.17.1"
 ndarray-linalg = { version = "0.18.0", features = ["openblas-system"] }
+# Workaround: ndarray-linalg's `lax` pulls openblas-src with default-features = false,
+# stripping the `rustls` default that openblas-build >= 0.10.16 unconditionally requires
+# (otherwise it hits a `compile_error!`). Adding openblas-src as a direct dep with
+# `rustls` enabled unifies the feature graph and forwards the feature to openblas-build
+# via openblas-src's `rustls = ["openblas-build/rustls"]` mapping.
+openblas-src = { version = "0.10.16", default-features = false, features = ["rustls"] }
 opencv = { version = "0.98", default-features = false, features = ["imgproc"] }
 ort = { version = "2.0.0-rc.12", default-features = false, features = ["ndarray"] }
 thiserror = "2.0.17"
