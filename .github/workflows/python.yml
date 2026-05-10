@@ -36,13 +36,17 @@ jobs:
         python-version: ["3.13", "3.14"]
     env:
       # The native extension links system OpenBLAS (via ndarray-linalg's
-      # `openblas-system`) and bundles ONNX Runtime; both spin up their own
-      # thread pools sized to the CPU count on first use. On the cgroup-
-      # constrained GitHub runners that combination has hung indefinitely
-      # at thread-pool init the first time a BLAS/ORT call runs. Serialize
-      # both pools — the tests are tiny and don't need the parallelism.
+      # `openblas-system`) and bundles ONNX Runtime; both spin up thread
+      # pools sized to the CPU count on first use, and on the GitHub runners
+      # the ORT pool's init has deadlocked (the ORT C call holds the GIL, so
+      # the interpreter wedges with it — see FishSegmentation::intra_threads).
+      # Serialize all of them; the 42-test suite has no need for parallelism.
       OPENBLAS_NUM_THREADS: "1"
       OMP_NUM_THREADS: "1"
+      FISHSENSE_ORT_INTRA_THREADS: "1"
+      # Where tests/conftest.py writes the faulthandler dump if something
+      # still wedges past its watchdog (printed by the "Show hang dump" step).
+      FISHSENSE_HANG_DUMP: /tmp/fishsense-hang.txt
     steps:
     - uses: actions/checkout@v4
     - name: Set up Python ${{ matrix.python-version }}
@@ -65,3 +69,6 @@ jobs:
     # fails that test, instead of the job silently burning to its timeout.
     - name: Run tests
       run: uv run --no-sync pytest --timeout=120 --timeout-method=thread --cov=fishsense_core --cov-report=xml --cov-report=html
+    - name: Show hang dump
+      if: failure()
+      run: cat "${FISHSENSE_HANG_DUMP}" 2>/dev/null || echo "(no hang dump — failure was not a watchdog timeout)"

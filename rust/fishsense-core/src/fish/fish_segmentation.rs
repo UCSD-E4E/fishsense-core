@@ -110,19 +110,29 @@ impl FishSegmentation {
         self.active_provider
     }
 
-    fn build_session_options() -> Result<ort::session::builder::SessionBuilder, ort::Error> {
-        // Cap intra-op threads at the number of usable CPUs — never
-        // oversubscribe. `available_parallelism` honors cgroup/affinity
-        // limits, so this is 2 on a 2-vCPU CI runner and 4 on anything
-        // with >= 4 cores (same as the old hard-coded 4 there). Spawning
-        // 4 ORT worker threads on a 2-vCPU runner could wedge the process:
-        // ORT's thread-pool init has deadlocked under that oversubscription,
-        // and the ORT C call doesn't release the GIL, so the whole
-        // interpreter hangs with it.
-        let intra_threads = std::thread::available_parallelism()
+    /// Intra-op thread count for the ORT session.
+    ///
+    /// Defaults to `min(4, usable CPUs)`. Override with
+    /// `FISHSENSE_ORT_INTRA_THREADS` — set it to `1` in environments where
+    /// ORT's worker-thread pool misbehaves (it has intermittently deadlocked
+    /// at thread-pool init on constrained CI runners; the ORT C call holds
+    /// the GIL throughout, so that wedges the whole interpreter), or bump it
+    /// up on a big host.
+    fn intra_threads() -> usize {
+        if let Some(n) = std::env::var("FISHSENSE_ORT_INTRA_THREADS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|n| *n >= 1)
+        {
+            return n;
+        }
+        std::thread::available_parallelism()
             .map(|n| n.get().min(4))
-            .unwrap_or(1);
-        let builder = Session::builder()?.with_intra_threads(intra_threads)?;
+            .unwrap_or(1)
+    }
+
+    fn build_session_options() -> Result<ort::session::builder::SessionBuilder, ort::Error> {
+        let builder = Session::builder()?.with_intra_threads(Self::intra_threads())?;
 
         // iOS enforces W^X, which blocks the runtime kernel fusion that
         // Level3 performs (causes EXC_BAD_ACCESS code=50). Level1 does only
