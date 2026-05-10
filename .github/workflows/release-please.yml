@@ -39,10 +39,13 @@ jobs:
         (github.event_name == 'workflow_dispatch' && inputs.tag != '')
       )
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Two builds (CPU + CUDA); the CUDA build also downloads a much larger
+    # ONNX Runtime bundle from pyke.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - name: Build wheel
+
+      - name: Build CPU wheels
         uses: PyO3/maturin-action@v1
         with:
           command: build
@@ -53,8 +56,36 @@ jobs:
             dnf install -y dnf-plugins-core epel-release
             dnf config-manager --set-enabled crb
             dnf install -y llvm-devel clang-devel opencv-devel openblas-devel openssl-devel
-      - name: Upload wheel to release
+
+      # Build the CUDA variant under a `+cu12` PEP 440 local version so its
+      # wheel filenames don't collide with the CPU ones on the release page.
+      # The CUDA runtime libs (libcudart/libcudnn/...) are NOT bundled — ORT's
+      # CUDA EP resolves them at runtime from the `nvidia-*-cu12` pip packages
+      # that `_preload_nvidia_libs()` loads (same as a from-source build), so
+      # auditwheel doesn't need any exclusions here.
+      - name: Tag the CUDA build with a +cu12 local version
+        run: |
+          sed -i 's/^version = "\([^"]*\)"$/version = "\1+cu12"/' python/fishsense_core/Cargo.toml
+          grep '^version' python/fishsense_core/Cargo.toml
+
+      - name: Build CUDA wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --strip --features cuda --manifest-path python/fishsense_core/Cargo.toml --out target/wheels-cuda --find-interpreter
+          target: x86_64-unknown-linux-gnu
+          manylinux: 2_34
+          before-script-linux: |
+            dnf install -y dnf-plugins-core epel-release
+            dnf config-manager --set-enabled crb
+            dnf install -y llvm-devel clang-devel opencv-devel openblas-devel openssl-devel
+
+      - name: Restore manifest
+        if: always()
+        run: git checkout -- python/fishsense_core/Cargo.toml
+
+      - name: Upload wheels to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag != '' && inputs.tag || needs.release-please.outputs.tag_name }}
-        run: gh release upload "$TAG" target/wheels/*.whl
+        run: gh release upload --clobber "$TAG" target/wheels/*.whl target/wheels-cuda/*.whl
