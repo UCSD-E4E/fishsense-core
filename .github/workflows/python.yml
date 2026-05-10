@@ -9,6 +9,7 @@ defaults:
 jobs:
   pylint:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       matrix:
         python-version: ["3.12"]
@@ -25,10 +26,11 @@ jobs:
         python -m pip install --upgrade pip uv
         uv sync --group dev
     - name: Analysing the code with pylint
-      run: uv run pylint fishsense_core/**/*.py
+      run: uv run --no-sync pylint fishsense_core/**/*.py
 
   test-ubuntu:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       matrix:
         python-version: ["3.13", "3.14"]
@@ -44,5 +46,10 @@ jobs:
         sudo apt-get install -y clang libclang-dev libopencv-dev libopenblas-dev
         python -m pip install --upgrade pip uv
         uv sync --group dev
+    # Load the native extension on its own first so an import-time deadlock
+    # (the Rust extension pulls in rayon/tokio) surfaces here instead of
+    # silently hanging the coverage run below.
+    - name: Import smoke test (no coverage)
+      run: uv run --no-sync python -c "import fishsense_core; import fishsense_core._native; print('import ok')"
     - name: Run tests
-      run: uv run pytest --cov=fishsense_core --cov-report=xml --cov-report=html
+      run: uv run --no-sync pytest --cov=fishsense_core --cov-report=xml --cov-report=html
