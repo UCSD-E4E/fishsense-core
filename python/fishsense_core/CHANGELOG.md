@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.1.2](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v2.1.1...fishsense_core-v2.1.2) (2026-05-10)
+
+
+### Bug Fixes
+
+* cap ORT intra-op threads at CPU count; add CI faulthandler watchdog ([aed4f41](https://github.com/UCSD-E4E/fishsense-core/commit/aed4f41b55bd6b7a8ac4d9623a57cd6fb2a8e159))
+* cap ORT intra-op threads at CPU count; add CI faulthandler watchdog ([efe6c53](https://github.com/UCSD-E4E/fishsense-core/commit/efe6c53468de2c4a1e190e3bde7e37b1332e86bb))
+* make ORT intra-op thread count overridable; run sessions single-threaded in CI ([3d90563](https://github.com/UCSD-E4E/fishsense-core/commit/3d905639987d7952838dea36df2ee0ac4574d5a4))
+* ORT intra-op threads overridable via env; run sessions single-threaded in CI ([1a9c5da](https://github.com/UCSD-E4E/fishsense-core/commit/1a9c5da0a3ed50f0cd61e16d83c41e6a6d80a431))
+* stub glibc 2.38 __isoc23_strtol exports so wheel loads on glibc &lt; 2.38 ([6288a62](https://github.com/UCSD-E4E/fishsense-core/commit/6288a622dcbfd57a52377a6be15a04e745273f30))
+* stub glibc 2.38 __isoc23_strtol exports so wheel loads on glibc &lt; 2.38 ([1654ee4](https://github.com/UCSD-E4E/fishsense-core/commit/1654ee46e71b34885c179653b73ba325c1fbd961))
+
 ## [2.1.1](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v2.1.0...fishsense_core-v2.1.1) (2026-05-09)
 
 
