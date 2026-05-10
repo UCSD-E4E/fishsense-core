@@ -12,6 +12,9 @@ crate-type = ["cdylib"]
 [features]
 cuda = ["fishsense-core/cuda"]
 
+[build-dependencies]
+cc = "1"
+
 [dependencies]
 fishsense-core = { path = "../../rust/fishsense-core" }
 ndarray = "0.17.1"
