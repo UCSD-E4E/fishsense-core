@@ -8,7 +8,14 @@ build = "build.rs"
 default = ["download-binaries"]
 download-binaries = ["ort/download-binaries", "ort/tls-rustls"]
 coreml = ["ort/coreml"]
-cuda = ["ort/cuda", "ort/copy-dylibs"]
+# CUDA uses ort's load-dynamic mode rather than bundling pyke's prebuilt
+# ORT-CUDA binary: those are built on a glibc >= 2.38 image (their
+# libonnxruntime_providers_cuda.so has versioned __isoc23_strtoll@GLIBC_2.38
+# refs) and won't dlopen on the manylinux_2_34 baseline. With load-dynamic the
+# cdylib links no ORT at all; at runtime it loads libonnxruntime.so from the
+# `onnxruntime-gpu` pip package (built for manylinux_2_27, glibc 2.27) — see
+# fishsense_core/__init__.py's `_set_ort_dylib_path`.
+cuda = ["ort/cuda", "ort/load-dynamic"]
 tracing-init = ["dep:tracing-subscriber"]
 
 [dev-dependencies]
@@ -34,6 +41,10 @@ ndarray-linalg = { version = "0.18.0", features = ["openblas-system"] }
 # via openblas-src's `rustls = ["openblas-build/rustls"]` mapping.
 openblas-src = { version = "0.10.16", default-features = false, features = ["rustls"] }
 opencv = { version = "0.98", default-features = false, features = ["imgproc"] }
-ort = { version = "2.0.0-rc.12", default-features = false, features = ["ndarray"] }
+# `api-24` is the ONNX Runtime C API version this `ort` release is written
+# against — the `download-binaries` build gets it transitively (it fetches
+# ms@1.24), but the `cuda` (load-dynamic) build links no ORT, so pin it here
+# explicitly or `ort`'s newer-EP bindings fail to compile.
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["ndarray", "api-24"] }
 thiserror = "2.0.17"
 tracing = "0.1"
