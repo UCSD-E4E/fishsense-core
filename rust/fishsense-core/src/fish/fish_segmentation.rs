@@ -111,7 +111,18 @@ impl FishSegmentation {
     }
 
     fn build_session_options() -> Result<ort::session::builder::SessionBuilder, ort::Error> {
-        let builder = Session::builder()?.with_intra_threads(4)?;
+        // Cap intra-op threads at the number of usable CPUs — never
+        // oversubscribe. `available_parallelism` honors cgroup/affinity
+        // limits, so this is 2 on a 2-vCPU CI runner and 4 on anything
+        // with >= 4 cores (same as the old hard-coded 4 there). Spawning
+        // 4 ORT worker threads on a 2-vCPU runner could wedge the process:
+        // ORT's thread-pool init has deadlocked under that oversubscription,
+        // and the ORT C call doesn't release the GIL, so the whole
+        // interpreter hangs with it.
+        let intra_threads = std::thread::available_parallelism()
+            .map(|n| n.get().min(4))
+            .unwrap_or(1);
+        let builder = Session::builder()?.with_intra_threads(intra_threads)?;
 
         // iOS enforces W^X, which blocks the runtime kernel fusion that
         // Level3 performs (causes EXC_BAD_ACCESS code=50). Level1 does only
