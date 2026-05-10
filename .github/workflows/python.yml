@@ -46,7 +46,7 @@ jobs:
       FISHSENSE_ORT_INTRA_THREADS: "1"
       # Where tests/conftest.py writes the faulthandler dump if something
       # still wedges past its watchdog (printed by the "Show hang dump" step).
-      FISHSENSE_HANG_DUMP: ${{ runner.temp }}/fishsense-hang.txt
+      FISHSENSE_HANG_DUMP: /tmp/fishsense-hang.txt
     steps:
     - uses: actions/checkout@v4
     - name: Set up Python ${{ matrix.python-version }}
