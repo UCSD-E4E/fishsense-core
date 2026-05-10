@@ -34,6 +34,15 @@ jobs:
     strategy:
       matrix:
         python-version: ["3.13", "3.14"]
+    env:
+      # The native extension links system OpenBLAS (via ndarray-linalg's
+      # `openblas-system`) and bundles ONNX Runtime; both spin up their own
+      # thread pools sized to the CPU count on first use. On the cgroup-
+      # constrained GitHub runners that combination has hung indefinitely
+      # at thread-pool init the first time a BLAS/ORT call runs. Serialize
+      # both pools — the tests are tiny and don't need the parallelism.
+      OPENBLAS_NUM_THREADS: "1"
+      OMP_NUM_THREADS: "1"
     steps:
     - uses: actions/checkout@v4
     - name: Set up Python ${{ matrix.python-version }}
@@ -51,5 +60,8 @@ jobs:
     # silently hanging the coverage run below.
     - name: Import smoke test (no coverage)
       run: uv run --no-sync python -c "import fishsense_core; import fishsense_core._native; print('import ok')"
+    # --timeout: if a test still hangs (e.g. a thread-pool deadlock the env
+    # vars above didn't catch), pytest-timeout dumps every thread's stack and
+    # fails that test, instead of the job silently burning to its timeout.
     - name: Run tests
-      run: uv run --no-sync pytest --cov=fishsense_core --cov-report=xml --cov-report=html
+      run: uv run --no-sync pytest --timeout=120 --timeout-method=thread --cov=fishsense_core --cov-report=xml --cov-report=html
