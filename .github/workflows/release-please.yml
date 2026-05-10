@@ -20,6 +20,7 @@ jobs:
   release-please:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       release_created: ${{ steps.release.outputs['rust/fishsense-core--release_created'] }}
       tag_name: ${{ steps.release.outputs['rust/fishsense-core--tag_name'] }}
@@ -38,6 +39,7 @@ jobs:
         (github.event_name == 'workflow_dispatch' && inputs.tag != '')
       )
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Build wheel
