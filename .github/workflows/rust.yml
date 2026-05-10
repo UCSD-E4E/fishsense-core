@@ -4,6 +4,12 @@ on: [push]
 
 env:
   CARGO_TERM_COLOR: always
+  # cargo test creates a real ORT session (active_provider_defaults_to_cpu);
+  # ORT's intra-op thread-pool init has deadlocked on the CI runners, so run
+  # the session single-threaded here. See FishSegmentation::intra_threads.
+  FISHSENSE_ORT_INTRA_THREADS: "1"
+  OPENBLAS_NUM_THREADS: "1"
+  OMP_NUM_THREADS: "1"
 
 jobs:
   build-ubuntu:
