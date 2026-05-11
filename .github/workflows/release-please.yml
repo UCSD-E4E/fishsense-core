@@ -39,9 +39,8 @@ jobs:
         (github.event_name == 'workflow_dispatch' && inputs.tag != '')
       )
     runs-on: ubuntu-latest
-    # Two builds (CPU + CUDA); the CUDA build also downloads a much larger
-    # ONNX Runtime bundle from pyke.
-    timeout-minutes: 60
+    # Two builds (CPU + CUDA).
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -57,16 +56,20 @@ jobs:
             dnf config-manager --set-enabled crb
             dnf install -y llvm-devel clang-devel opencv-devel openblas-devel openssl-devel
 
-      # Build the CUDA variant under a `+cu12` PEP 440 local version so its
-      # wheel filenames don't collide with the CPU ones on the release page.
-      # The CUDA runtime libs (libcudart/libcudnn/...) are NOT bundled — ORT's
-      # CUDA EP resolves them at runtime from the `nvidia-*-cu12` pip packages
-      # that `_preload_nvidia_libs()` loads (same as a from-source build), so
-      # auditwheel doesn't need any exclusions here.
-      - name: Tag the CUDA build with a +cu12 local version
+      # The CUDA variant: built with `--features cuda` → ort's load-dynamic mode
+      # (the cdylib links no ORT; at runtime it loads libonnxruntime.so from the
+      # `onnxruntime-gpu` pip package, which — unlike pyke's prebuilt ORT-CUDA —
+      # is built for manylinux_2_27 and loads on glibc < 2.38). Two manifest
+      # tweaks for this build only: a `+cu12` PEP 440 local version (so its wheel
+      # filenames don't collide with the CPU ones on the release page) and an
+      # `onnxruntime-gpu` runtime dependency (== the ONNX Runtime version `ort`
+      # 2.0.0-rc.12 targets).
+      - name: Prepare the CUDA build manifest
         run: |
           sed -i 's/^version = "\([^"]*\)"$/version = "\1+cu12"/' python/fishsense_core/Cargo.toml
+          sed -i '/^dependencies = \[$/a\    "onnxruntime-gpu==1.24.*",' python/fishsense_core/pyproject.toml
           grep '^version' python/fishsense_core/Cargo.toml
+          grep -A8 '^dependencies = \[' python/fishsense_core/pyproject.toml
 
       - name: Build CUDA wheels
         uses: PyO3/maturin-action@v1
@@ -80,9 +83,9 @@ jobs:
             dnf config-manager --set-enabled crb
             dnf install -y llvm-devel clang-devel opencv-devel openblas-devel openssl-devel
 
-      - name: Restore manifest
+      - name: Restore manifests
         if: always()
-        run: git checkout -- python/fishsense_core/Cargo.toml
+        run: git checkout -- python/fishsense_core/Cargo.toml python/fishsense_core/pyproject.toml
 
       - name: Upload wheels to release
         env:
