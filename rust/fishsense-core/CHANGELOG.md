@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.1.3](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v2.1.2...fishsense-core-v2.1.3) (2026-05-11)
+
+
+### Bug Fixes
+
+* build the CUDA wheel against onnxruntime-gpu so it loads on glibc &lt; 2.38 ([dbfc38e](https://github.com/UCSD-E4E/fishsense-core/commit/dbfc38e3ba19dfbc396fc31aa1d1a410d87cd14d))
+* build the CUDA wheel against onnxruntime-gpu so it loads on glibc &lt; 2.38 ([939b292](https://github.com/UCSD-E4E/fishsense-core/commit/939b292935091c3098961e8bcafc4705ee29f8f9))
+
 ## [2.1.2](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v2.1.1...fishsense-core-v2.1.2) (2026-05-10)
 
 
