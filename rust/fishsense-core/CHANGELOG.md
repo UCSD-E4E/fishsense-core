@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.1.4](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v2.1.3...fishsense-core-v2.1.4) (2026-05-13)
+
+
+### Bug Fixes
+
+* silence ONNX Runtime stderr spam on the no-fish segmentation path ([e435083](https://github.com/UCSD-E4E/fishsense-core/commit/e435083c9b72785e60d3793820d349ae061a6ab3))
+* silence ONNX Runtime stderr spam on the no-fish segmentation path ([2ec65a5](https://github.com/UCSD-E4E/fishsense-core/commit/2ec65a5ed5f6c04d69e67309e75e65babda70806))
+
 ## [2.1.3](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v2.1.2...fishsense-core-v2.1.3) (2026-05-11)
 
 
