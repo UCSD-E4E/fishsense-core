@@ -11,6 +11,7 @@ use opencv::imgproc::{
     fill_poly, find_contours_with_hierarchy, resize_def, CHAIN_APPROX_NONE, LINE_8, RETR_CCOMP,
 };
 use opencv::prelude::MatTraitConst;
+use ort::logging::LogLevel;
 use ort::session::{Session, builder::GraphOptimizationLevel};
 use ort::value::TensorRef;
 use thiserror::Error;
@@ -133,6 +134,20 @@ impl FishSegmentation {
 
     fn build_session_options() -> Result<ort::session::builder::SessionBuilder, ort::Error> {
         let builder = Session::builder()?.with_intra_threads(Self::intra_threads())?;
+
+        // Silence ORT's per-kernel ERROR spam on the no-fish path. The upstream
+        // FishIAL Mask R-CNN graph's mask head does `/Reshape_168`:
+        // [N,1,56,56] → [N,1,-1], which ORT rejects when N == 0 — i.e. every
+        // image where the detector finds nothing. We already catch the
+        // resulting `ort::Error` and treat it as "no fish detected" (see
+        // `do_inference` / `inference`), but ORT's C++ logger writes the
+        // ExecuteKernel failure straight to fd 2 at ERROR severity *before* the
+        // error propagates, bypassing Rust logging and any stderr redirection a
+        // caller (e.g. an eval harness) set up. Raising the session log
+        // severity to FATAL drops those expected, already-handled messages;
+        // genuine problems still surface via the `tracing` macros below and via
+        // the returned `Result`.
+        let builder = builder.with_log_level(LogLevel::Fatal)?;
 
         // iOS enforces W^X, which blocks the runtime kernel fusion that
         // Level3 performs (causes EXC_BAD_ACCESS code=50). Level1 does only
@@ -944,6 +959,34 @@ mod tests {
         s.load_model().unwrap();
         let result = s.inference(&img).unwrap();
         assert_eq!(result.dim(), (480, 640), "output shape must match input H×W");
+    }
+
+    /// A no-fish image makes the FishIAL Mask R-CNN mask head fail its
+    /// empty-batch `/Reshape_168` kernel. `inference_smoke` already covers the
+    /// behavioural half of the fix (it returns `Ok` with an all-zero mask);
+    /// this covers the other half — `build_session_options` raised the ORT
+    /// session log severity to FATAL, so ORT must not write that kernel error
+    /// to stderr. We redirect fd 2 around the call and assert it stays empty.
+    #[test]
+    fn inference_no_fish_is_silent_on_stderr() {
+        use gag::BufferRedirect;
+        use std::io::Read;
+
+        let img: Array3<u8> = Array3::zeros((480, 640, 3));
+        let mut s = FishSegmentation::new();
+        s.load_model().unwrap();
+
+        let mut captured = String::new();
+        {
+            let mut buf = BufferRedirect::stderr().expect("redirect stderr");
+            let result = s.inference(&img).unwrap();
+            assert_eq!(result.dim(), (480, 640));
+            buf.read_to_string(&mut captured).unwrap();
+        }
+        assert!(
+            captured.is_empty(),
+            "ORT wrote to stderr on a no-fish image (session log severity not suppressed?):\n{captured}"
+        );
     }
 
     /// Default-feature builds have no accelerator EP; `active_provider` must
