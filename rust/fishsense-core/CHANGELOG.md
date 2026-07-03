@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.5](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v2.1.4...fishsense-core-v2.1.5) (2026-07-03)
+
+
+### Bug Fixes
+
+* stabilize fishial.onnx download in build.rs ([596fd54](https://github.com/UCSD-E4E/fishsense-core/commit/596fd54252125f97a5b5e5e156289acdcd3fb2ee))
+
 ## [2.1.4](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v2.1.3...fishsense-core-v2.1.4) (2026-05-13)
 
 
