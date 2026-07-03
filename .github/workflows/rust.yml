@@ -18,16 +18,15 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-    - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libopenblas-dev
+    # The toolchain and native libs (Rust, OpenBLAS, OpenSSL, pkg-config) all
+    # come from the flake dev shell — same environment as local development.
+    - uses: DeterminateSystems/nix-installer-action@main
     - name: Build
-      run: cargo build --verbose
+      run: nix develop --command cargo build --verbose
     - name: Lint
-      run: cargo clippy --verbose --all-targets --all-features -- -D warnings
+      run: nix develop --command bash -c "cargo clippy --verbose --all-targets --all-features -- -D warnings"
     - name: Run tests
-      run: cargo test --verbose
+      run: nix develop --command cargo test --verbose
 
   build-macos:
     runs-on: macos-latest
@@ -35,11 +34,10 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-    - name: Install dependencies
-      run: brew install openblas
+    - uses: DeterminateSystems/nix-installer-action@main
     - name: Build
-      run: cargo build --verbose
+      run: nix develop --command cargo build --verbose
     - name: Lint
-      run: cargo clippy --verbose --all-targets --all-features -- -D warnings
+      run: nix develop --command bash -c "cargo clippy --verbose --all-targets --all-features -- -D warnings"
     - name: Run tests
-      run: cargo test --verbose
+      run: nix develop --command cargo test --verbose

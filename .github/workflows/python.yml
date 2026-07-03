@@ -15,18 +15,15 @@ jobs:
         python-version: ["3.12"]
     steps:
     - uses: actions/checkout@v4
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ matrix.python-version }}
+    - uses: DeterminateSystems/nix-installer-action@main
+    # The flake (Rust, uv, OpenBLAS, OpenSSL, pkg-config) lives at the repo
+    # root; steps run in python/fishsense_core, so reference it by absolute
+    # path. uv provisions the matrix Python itself, so the flake's own Python
+    # pin doesn't constrain the version matrix.
     - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libopenblas-dev
-        python -m pip install --upgrade pip uv
-        uv sync --group dev
+      run: nix develop "$GITHUB_WORKSPACE" --command bash -c "uv sync --group dev --python ${{ matrix.python-version }}"
     - name: Analysing the code with pylint
-      run: uv run --no-sync pylint fishsense_core/**/*.py
+      run: nix develop "$GITHUB_WORKSPACE" --command bash -c "uv run --no-sync pylint fishsense_core/**/*.py"
 
   test-ubuntu:
     runs-on: ubuntu-latest
@@ -49,26 +46,19 @@ jobs:
       FISHSENSE_HANG_DUMP: /tmp/fishsense-hang.txt
     steps:
     - uses: actions/checkout@v4
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ matrix.python-version }}
+    - uses: DeterminateSystems/nix-installer-action@main
     - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libopenblas-dev
-        python -m pip install --upgrade pip uv
-        uv sync --group dev
+      run: nix develop "$GITHUB_WORKSPACE" --command bash -c "uv sync --group dev --python ${{ matrix.python-version }}"
     # Load the native extension on its own first so an import-time deadlock
     # (the Rust extension pulls in rayon/tokio) surfaces here instead of
     # silently hanging the coverage run below.
     - name: Import smoke test (no coverage)
-      run: uv run --no-sync python -c "import fishsense_core; import fishsense_core._native; print('import ok')"
+      run: nix develop "$GITHUB_WORKSPACE" --command bash -c "uv run --no-sync python -c 'import fishsense_core; import fishsense_core._native; print(\"import ok\")'"
     # --timeout: if a test still hangs (e.g. a thread-pool deadlock the env
     # vars above didn't catch), pytest-timeout dumps every thread's stack and
     # fails that test, instead of the job silently burning to its timeout.
     - name: Run tests
-      run: uv run --no-sync pytest --timeout=120 --timeout-method=thread --cov=fishsense_core --cov-report=xml --cov-report=html
+      run: nix develop "$GITHUB_WORKSPACE" --command bash -c "uv run --no-sync pytest --timeout=120 --timeout-method=thread --cov=fishsense_core --cov-report=xml --cov-report=html"
     - name: Show hang dump
       if: failure()
       run: cat "${FISHSENSE_HANG_DUMP}" 2>/dev/null || echo "(no hang dump — failure was not a watchdog timeout)"
