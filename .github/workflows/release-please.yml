@@ -54,7 +54,7 @@ jobs:
           before-script-linux: |
             dnf install -y dnf-plugins-core epel-release
             dnf config-manager --set-enabled crb
-            dnf install -y llvm-devel clang-devel opencv-devel openblas-devel openssl-devel
+            dnf install -y openblas-devel openssl-devel
 
       # The CUDA variant: built with `--features cuda` → ort's load-dynamic mode
       # (the cdylib links no ORT; at runtime it loads libonnxruntime.so from the
@@ -81,7 +81,7 @@ jobs:
           before-script-linux: |
             dnf install -y dnf-plugins-core epel-release
             dnf config-manager --set-enabled crb
-            dnf install -y llvm-devel clang-devel opencv-devel openblas-devel openssl-devel
+            dnf install -y openblas-devel openssl-devel
 
       - name: Restore manifests
         if: always()

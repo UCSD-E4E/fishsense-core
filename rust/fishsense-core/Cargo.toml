@@ -20,8 +20,11 @@ tracing-init = ["dep:tracing-subscriber"]
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Codecs enabled for the test build only (additive over the lean production
+# `image` dep): the segmentation regression fixture is a committed JPEG input
+# with a PNG golden mask.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 ndarray-npy = "0.10"
-ndarray-stats = "0.7"
 serde_json = "1"
 # fd-level stderr capture for the "ORT stays quiet on a no-fish image" test.
 gag = "1"
@@ -42,7 +45,13 @@ ndarray-linalg = { version = "0.18.0", features = ["openblas-system"] }
 # `rustls` enabled unifies the feature graph and forwards the feature to openblas-build
 # via openblas-src's `rustls = ["openblas-build/rustls"]` mapping.
 openblas-src = { version = "0.10.16", default-features = false, features = ["rustls"] }
-opencv = { version = "0.98", default-features = false, features = ["imgproc"] }
+# Pure-Rust replacement for the OpenCV imgproc functions this crate used
+# (bilinear resize, Suzuki contour tracing, filled-polygon rasterization).
+# `image` provides ImageBuffer + imageops::resize; `imageproc` provides
+# contours::find_contours and drawing::draw_polygon_mut. Neither needs a
+# system C++ library, unlike the `opencv` crate it replaced.
+image = { version = "0.25", default-features = false }
+imageproc = { version = "0.25", default-features = false }
 # `api-24` is the ONNX Runtime C API version this `ort` release is written
 # against — the `download-binaries` build gets it transitively (it fetches
 # ms@1.24), but the `cuda` (load-dynamic) build links no ORT, so pin it here

@@ -61,20 +61,20 @@ Rust functions are available directly through `fishsense_core._native` (e.g. `_n
 
 ## Development
 
-**Prerequisites:** Rust toolchain, Python 3.13+, [uv](https://docs.astral.sh/uv/)
-
-**macOS:** The `opencv` crate requires `libclang` at build time. Add the following to your `~/.zshrc` (or `.envrc` if you use direnv):
+**Nix (recommended):** A flake provides the full toolchain (Rust, uv, Python, OpenBLAS, OpenSSL, pkg-config) with the loader paths preconfigured:
 
 ```bash
-export LIBCLANG_PATH="$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib"
-export DYLD_LIBRARY_PATH="$LIBCLANG_PATH"
+nix develop            # or `direnv allow` once, then it loads automatically
 ```
 
-**Ubuntu:** Install system dependencies before building:
+**Without Nix:**
 
-```bash
-sudo apt-get install -y clang libclang-dev libopencv-dev libopenblas-dev
-```
+- **Prerequisites:** Rust toolchain, Python 3.13+, [uv](https://docs.astral.sh/uv/)
+- **Ubuntu:** install system dependencies first:
+
+  ```bash
+  sudo apt-get install -y libopenblas-dev
+  ```
 
 ```bash
 # Install Python dependencies and build the Rust extension

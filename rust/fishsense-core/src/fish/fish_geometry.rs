@@ -11,9 +11,7 @@ use geo::{
     Area, BooleanOps, Closest, ClosestPoint, ConvexHull, Distance, Euclidean, LineString,
     MultiPolygon, Point, Polygon,
 };
-use opencv::core::{Mat, Point2i, Vector, CV_8UC1};
-use opencv::imgproc::{find_contours_with_hierarchy, CHAIN_APPROX_NONE, RETR_EXTERNAL};
-use std::ffi::c_void;
+use imageproc::contours::{find_contours, BorderType};
 
 // ── private helpers ───────────────────────────────────────────────────────────
 
@@ -24,7 +22,7 @@ fn dist_pt_line(pt: Point<f64>, line: &LineString<f64>) -> f64 {
         Closest::Indeterminate => f64::INFINITY,
     }
 }
-use ndarray::Array2;
+use ndarray::{s, Array2};
 
 use crate::errors::FishSenseError;
 use crate::fish::fish_peduncle::classify_by_peduncle;
@@ -43,7 +41,9 @@ pub struct ClassifiedEndpoints {
 // ── perimeter extraction ──────────────────────────────────────────────────
 
 /// Extracts the ordered boundary of the largest external component of a
-/// binary mask using `cv::findContours` (CHAIN_APPROX_NONE, RETR_EXTERNAL).
+/// binary mask using Suzuki contour tracing (`imageproc::contours`, the
+/// pure-Rust equivalent of `cv::findContours` with RETR_EXTERNAL and
+/// CHAIN_APPROX_NONE — every boundary pixel, no vertex approximation).
 ///
 /// Returns pixels in `[col, row]` order, topologically ordered around the
 /// contour so the resulting `LineString` forms a non-self-intersecting loop.
@@ -51,48 +51,51 @@ pub struct ClassifiedEndpoints {
 ///
 /// The previous hand-rolled Moore trace fell back to scanline enumeration on
 /// complex shapes (forked tails), which silently produced self-crossing
-/// "polygons" whose geometric ops were nonsense — hence the regression to
-/// `findContours`, which guarantees a valid ordering.
+/// "polygons" whose geometric ops were nonsense — hence the regression to a
+/// Suzuki tracer, which guarantees a valid ordering.
 pub fn extract_perimeter(mask: &Array2<u8>) -> Vec<[f64; 2]> {
+    // Multiple disjoint components (e.g. segmentation noise) yield multiple
+    // outer contours; pick the longest, which corresponds to the fish.
+    let Some(largest) = trace_outer_contours(mask)
+        .into_iter()
+        .max_by_key(|c| c.len())
+    else {
+        return vec![];
+    };
+
+    largest.iter().map(|p| [p[0] as f64, p[1] as f64]).collect()
+}
+
+/// Traces the outer contours of a binary mask (Suzuki algorithm via
+/// `imageproc::contours`), returning each as an ordered list of `[col, row]`
+/// pixels. This is the pure-Rust stand-in for `cv::findContours` with
+/// CHAIN_APPROX_NONE (every boundary pixel, no vertex approximation).
+///
+/// Unlike OpenCV's `findContours`, `imageproc` does not implicitly treat the
+/// image frame as background, so a foreground object touching the mask border
+/// yields no contour. We reproduce OpenCV's behavior by padding a one-pixel
+/// zero border before tracing and shifting the returned coordinates back by
+/// one — which also keeps every returned coordinate within the original
+/// `[0, width) × [0, height)` bounds. Returns an empty `Vec` when the mask has
+/// no foreground pixels.
+pub(crate) fn trace_outer_contours(mask: &Array2<u8>) -> Vec<Vec<[i32; 2]>> {
     if !mask.iter().any(|&v| v != 0) {
         return vec![];
     }
 
-    let arr = mask.as_standard_layout();
-    let (height, width) = arr.dim();
-    let data_ptr = arr.as_ptr() as *mut c_void;
-
-    // SAFETY: the Mat borrows `arr`'s storage; `arr` lives for this function
-    // and is dropped after the Mat.
-    let mat = match unsafe {
-        Mat::new_rows_cols_with_data_unsafe_def(height as i32, width as i32, CV_8UC1, data_ptr)
-    } {
-        Ok(m) => m,
-        Err(_) => return vec![],
-    };
-
-    let mut contours: Vector<Vector<Point2i>> = Vector::new();
-    let mut hierarchy: Vector<opencv::core::Vec4i> = Vector::new();
-    if find_contours_with_hierarchy(
-        &mat,
-        &mut contours,
-        &mut hierarchy,
-        RETR_EXTERNAL,
-        CHAIN_APPROX_NONE,
-        Point2i::new(0, 0),
-    )
-    .is_err()
-    {
-        return vec![];
-    }
-
-    // Multiple disjoint components (e.g. segmentation noise) yield multiple
-    // external contours; pick the longest, which corresponds to the fish.
-    let Some(largest) = contours.iter().max_by_key(|c| c.len()) else {
+    let (height, width) = mask.dim();
+    let mut padded = Array2::<u8>::zeros((height + 2, width + 2));
+    padded.slice_mut(s![1..height + 1, 1..width + 1]).assign(mask);
+    let raw: Vec<u8> = padded.iter().copied().collect();
+    let Some(buf) = image::GrayImage::from_raw((width + 2) as u32, (height + 2) as u32, raw) else {
         return vec![];
     };
 
-    largest.iter().map(|p| [p.x as f64, p.y as f64]).collect()
+    find_contours::<i32>(&buf)
+        .into_iter()
+        .filter(|c| c.border_type == BorderType::Outer)
+        .map(|c| c.points.into_iter().map(|p| [p.x - 1, p.y - 1]).collect())
+        .collect()
 }
 
 // ── geometry helpers ──────────────────────────────────────────────────────

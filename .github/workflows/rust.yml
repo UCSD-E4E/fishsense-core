@@ -21,7 +21,7 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y clang libclang-dev libopencv-dev libopenblas-dev
+        sudo apt-get install -y libopenblas-dev
     - name: Build
       run: cargo build --verbose
     - name: Lint
@@ -36,12 +36,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: Install dependencies
-      run: brew install opencv openblas
-    - name: Set libclang path
-      run: |
-        LIBCLANG_DIR="$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib"
-        echo "LIBCLANG_PATH=$LIBCLANG_DIR" >> $GITHUB_ENV
-        echo "DYLD_LIBRARY_PATH=$LIBCLANG_DIR" >> $GITHUB_ENV
+      run: brew install openblas
     - name: Build
       run: cargo build --verbose
     - name: Lint
