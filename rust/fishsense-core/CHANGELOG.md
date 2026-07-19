@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.1.6](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v2.1.5...fishsense-core-v2.1.6) (2026-07-19)
+
+
+### Bug Fixes
+
+* **segmentation:** rank inference_single by score×area, not area alone ([8d36166](https://github.com/UCSD-E4E/fishsense-core/commit/8d361660750e232a909a9dee677610160fd06a7b))
+* **segmentation:** rank inference_single by score×area, not area alone ([560b8c9](https://github.com/UCSD-E4E/fishsense-core/commit/560b8c9235edea003220b39c49ec1761e41bb9c0))
+
 ## [2.1.5](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v2.1.4...fishsense-core-v2.1.5) (2026-07-03)
 
 
