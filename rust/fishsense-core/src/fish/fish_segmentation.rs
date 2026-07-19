@@ -582,10 +582,16 @@ impl FishSegmentation {
         }
     }
 
-    /// Selects the single detection with the largest thresholded-mask area
+    /// Selects the single detection maximizing `score × thresholded-mask area`
     /// (among those passing score, contour-vertex, and minimum-area filters)
     /// and returns a binary 0/255 mask for that detection only.  Returns
     /// `None` if no detection passes all filters.
+    ///
+    /// Ranking by confidence-weighted area (rather than area alone) prevents a
+    /// low-confidence over-large detection — e.g. a fish mask that bled into an
+    /// occluding hand, or a barely-above-threshold blob — from overriding a
+    /// high-confidence tight fish detection. Validated against human head/tail
+    /// labels: score×area is Pareto-safe vs largest-area and never picks worse.
     fn build_single_instance_mask(
         &self,
         boxes: &ArrayD<f32>,
@@ -602,8 +608,8 @@ impl FishSegmentation {
         masks_t.swap_axes(1, 2);
 
         // Keep only the best polygon's full-resolution point list, so we
-        // rasterize exactly once at the end.
-        let mut best: Option<(u32, Vec<Point<i32>>)> = None;
+        // rasterize exactly once at the end. `best` holds (score×area, points).
+        let mut best: Option<(f32, Vec<Point<i32>>)> = None;
 
         let mask_count = scores.len();
         for ind in 0..mask_count {
@@ -634,8 +640,12 @@ impl FishSegmentation {
             if area < Self::MIN_SINGLE_INSTANCE_AREA_PX {
                 continue;
             }
-            if let Some((best_area, _)) = best.as_ref()
-                && area <= *best_area
+            // Confidence-weighted area: a bigger mask only wins if its detection
+            // score backs it up. Safe to skip the polygon step for any detection
+            // that cannot beat the current best on this metric.
+            let metric = scores[ind] * area as f32;
+            if let Some((best_metric, _)) = best.as_ref()
+                && metric <= *best_metric
             {
                 continue;
             }
@@ -662,7 +672,7 @@ impl FishSegmentation {
                     )
                 })
                 .collect();
-            best = Some((area, full_res));
+            best = Some((metric, full_res));
         }
 
         let Some((_, polygon_full)) = best else {
