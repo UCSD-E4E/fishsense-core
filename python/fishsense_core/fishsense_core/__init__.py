@@ -23,6 +23,9 @@ def _preload_nvidia_libs() -> None:
     Failures are intentionally swallowed: this is a best-effort preload, and
     every "expected" failure path (no nvidia-* installed, libs already loaded
     by another importer, no CUDA at all, non-CUDA build) should be silent.
+    Because it runs at package-import time, it must never be the reason
+    ``import fishsense_core`` fails — so discovery is guarded too, not just
+    the individual ``dlopen`` calls.
     """
     if not sys.platform.startswith("linux"):
         return
@@ -32,15 +35,37 @@ def _preload_nvidia_libs() -> None:
     except ImportError:
         return
 
-    nvidia_root = os.path.dirname(nvidia.__file__)
-    if not os.path.isdir(nvidia_root):
+    try:
+        roots = _nvidia_search_roots(nvidia)
+    except Exception:  # pylint: disable=broad-except
         return
 
-    for lib in sorted(glob(os.path.join(nvidia_root, "*", "lib", "*.so*"))):
+    for root in roots:
         try:
-            ctypes.CDLL(lib, mode=ctypes.RTLD_GLOBAL)
+            libs = sorted(glob(os.path.join(root, "*", "lib", "*.so*")))
         except OSError:
-            pass
+            continue
+        for lib in libs:
+            try:
+                ctypes.CDLL(lib, mode=ctypes.RTLD_GLOBAL)
+            except OSError:
+                pass
+
+
+def _nvidia_search_roots(nvidia) -> list:
+    """Directories under which to look for ``<pkg>/lib/*.so*``.
+
+    The ``nvidia-*-cu12`` wheels each contribute a subpackage to a shared
+    ``nvidia`` *namespace* package. Namespace packages set ``__file__`` to
+    ``None`` and carry their location only in ``__path__``, so reading
+    ``__file__`` alone raises ``TypeError`` in exactly the configuration that
+    matters most (torch installed). Prefer ``__path__``; fall back to
+    ``__file__`` for a conventional package.
+    """
+    roots = [str(p) for p in getattr(nvidia, "__path__", [])]
+    if not roots and getattr(nvidia, "__file__", None):
+        roots = [os.path.dirname(nvidia.__file__)]
+    return [root for root in roots if os.path.isdir(root)]
 
 
 def _set_ort_dylib_path() -> None:

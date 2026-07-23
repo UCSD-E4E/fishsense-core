@@ -1,9 +1,7 @@
 """FishSense Core Package"""
 
-import io
 import logging
 import math
-from contextlib import contextmanager
 from pathlib import Path
 
 import cv2
@@ -12,7 +10,7 @@ import rawpy
 from skimage.exposure import adjust_gamma, equalize_adapthist # pylint: disable=no-name-in-module
 from skimage.util import img_as_float, img_as_ubyte
 
-from fishsense_core.image.image import Image
+from fishsense_core.image.image import Image, open_image_source
 
 _log = logging.getLogger(__name__)
 
@@ -27,14 +25,6 @@ class RawImage(Image):
 
         super().__init__()
 
-    @contextmanager
-    def __open_source(self):
-        if isinstance(self.__source, (bytes, bytearray, memoryview)):
-            yield io.BytesIO(self.__source)
-        else:
-            with self.__source.open("rb") as f:
-                yield f
-
     def _get_data(self) -> np.ndarray:
         """Loads the raw image and processes it."""
         if isinstance(self.__source, (bytes, bytearray, memoryview)):
@@ -42,7 +32,7 @@ class RawImage(Image):
         else:
             _log.debug("loading raw image: %s", self.__source)
 
-        with self.__open_source() as f:
+        with open_image_source(self.__source) as f:
             with rawpy.imread(f) as raw:
                 img = img_as_float(
                     raw.postprocess(

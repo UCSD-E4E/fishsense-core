@@ -1,9 +1,21 @@
-"""Functions for controlling the laser."""
+"""Laser calibration and laser-dot detection."""
 import logging
 
 import numpy as np
 
 from fishsense_core import _native
+from fishsense_core._laser_detector import (
+    DEFAULT_RIG_PRIOR_BBOX,
+    LaserDetector,
+    LaserPrediction,
+)
+
+__all__ = [
+    "DEFAULT_RIG_PRIOR_BBOX",
+    "LaserDetector",
+    "LaserPrediction",
+    "calibrate_laser",
+]
 
 _log = logging.getLogger(__name__)
 
