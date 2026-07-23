@@ -23,6 +23,16 @@ dependencies = [
     "scikit-image>=0.25.2",
 ]
 
+[project.optional-dependencies]
+# The laser detector runs a PyTorch checkpoint. Kept out of the base install:
+# torch pulls its own CUDA runtime, which would both bloat every wheel and
+# collide with the onnxruntime CPU/+cu12 split the released wheels rely on.
+laser-detector = [
+    "torch>=2.4",
+    "segmentation-models-pytorch>=0.4",
+    "huggingface-hub>=0.26",
+]
+
 [tool.uv.sources]
 fishsense-api-sdk = { git = "https://github.com/UCSD-E4E/fishsense-api-sdk.git" }
 

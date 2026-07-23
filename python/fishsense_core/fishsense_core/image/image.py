@@ -1,12 +1,28 @@
 """Abstract base classes for FishSense Core."""
 
+import io
 import logging
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
+from pathlib import Path
 
 import cv2
 import numpy as np
 
 _log = logging.getLogger(__name__)
+
+
+@contextmanager
+def open_image_source(source: Path | bytes):
+    """Yields a binary file-like object for a path or an in-memory buffer.
+
+    Shared by the raw-image decoders so they accept the same source types.
+    """
+    if isinstance(source, (bytes, bytearray, memoryview)):
+        yield io.BytesIO(source)
+    else:
+        with source.open("rb") as f:
+            yield f
 
 
 class Image(ABC):
