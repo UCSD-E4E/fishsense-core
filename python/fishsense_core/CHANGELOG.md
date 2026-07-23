@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v2.1.6...fishsense_core-v2.2.0) (2026-07-23)
+
+
+### Features
+
+* **laser:** add LaserDetector inference stack + linear raw decode ([#57](https://github.com/UCSD-E4E/fishsense-core/issues/57)) ([ea929ad](https://github.com/UCSD-E4E/fishsense-core/commit/ea929ad2893106755c80da6949f512d1eb23733a))
+
 ## [2.1.6](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v2.1.5...fishsense_core-v2.1.6) (2026-07-19)
 
 
