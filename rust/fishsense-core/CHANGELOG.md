@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v2.1.6...fishsense-core-v2.2.0) (2026-07-23)
+
+
+### Miscellaneous Chores
+
+* **fishsense-core:** Synchronize fishsense versions
+
 ## [2.1.6](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v2.1.5...fishsense-core-v2.1.6) (2026-07-19)
 
 

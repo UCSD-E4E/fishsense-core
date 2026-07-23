@@ -1,4 +1,4 @@
 {
-  "rust/fishsense-core": "2.1.6",
-  "python/fishsense_core": "2.1.6"
+  "rust/fishsense-core": "2.2.0",
+  "python/fishsense_core": "2.2.0"
 }
