@@ -385,3 +385,61 @@ def test_upsample_rejects_unknown_mode():
 def test_linear_raw_image_rejects_unknown_upsample():
     with pytest.raises(ValueError, match="bayer_upsample must be one of"):
         lri.LinearRawImage(b"", bayer_upsample="lanczos")
+
+
+# --------------------------------------------------------------------------
+# Checkpoint identity resolution
+#
+# The bias offset is a per-checkpoint calibration keyed by the checkpoint's
+# identity. Filename is a fragile identity — a run3 checkpoint saved under any
+# other name (as a downstream audit hit) would otherwise lose its offset
+# silently. Resolution falls back to content hash, and an unrecognized
+# checkpoint must fail loudly rather than default to a zero offset.
+# --------------------------------------------------------------------------
+
+
+def test_canonical_name_matches_published_filename(tmp_path):
+    p = tmp_path / "run3_epoch_021.pt"
+    p.write_bytes(b"not actually a checkpoint")  # filename hit, contents unread
+    assert ld._canonical_checkpoint_name(p) == "run3_epoch_021.pt"
+
+
+def test_canonical_name_resolves_renamed_copy_by_content(tmp_path, monkeypatch):
+    """A published checkpoint saved under a different name still resolves."""
+    body = b"pretend this is the run3 checkpoint bytes"
+    import hashlib
+
+    digest = hashlib.sha256(body).hexdigest()
+    monkeypatch.setitem(ld.CHECKPOINT_SHA256, digest, "run3_epoch_021.pt")
+    p = tmp_path / "epoch_021.pt"  # the exact rename that bit the downstream audit
+    p.write_bytes(body)
+    assert ld._canonical_checkpoint_name(p) == "run3_epoch_021.pt"
+
+
+def test_canonical_name_is_none_for_unknown_checkpoint(tmp_path):
+    p = tmp_path / "some_other_model.pt"
+    p.write_bytes(b"unrecognized")
+    assert ld._canonical_checkpoint_name(p) is None
+
+
+def test_published_checkpoint_hashes_map_to_canonical_names():
+    # Every hashed checkpoint must name one that also has an encoder and offset.
+    for name in ld.CHECKPOINT_SHA256.values():
+        assert name in ld.CHECKPOINT_ENCODERS
+        assert name in ld.CHECKPOINT_BIAS_OFFSETS
+
+
+def test_from_checkpoint_raises_on_unknown_bias(tmp_path):
+    """An unrecognized checkpoint with no explicit bias must raise, not run
+    with a silent (0, 0) offset."""
+    torch = pytest.importorskip("torch")
+    ckpt = tmp_path / "mystery.pt"
+    # cfg supplies the encoder so resolution reaches the bias check, which is
+    # the behaviour under test; the state dict is never loaded (raise is first).
+    torch.save(
+        {"cfg": {"encoder_name": "resnet34", "in_channels": 6},
+         "model_state_dict": {}},
+        ckpt,
+    )
+    with pytest.raises(ValueError, match="no bias offset known"):
+        ld.LaserDetector.from_checkpoint(ckpt, device="cpu")

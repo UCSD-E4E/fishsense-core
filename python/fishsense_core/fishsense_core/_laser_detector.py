@@ -110,6 +110,18 @@ CHECKPOINT_ENCODERS: dict[str, str] = {
     "run3_epoch_021.pt": "resnet34",
     "run7_hrnet_w18_epoch_021.pt": "tu-hrnet_w18",
 }
+
+# Content hashes (sha256 of the raw .pt bytes) of the published checkpoints, so
+# a local copy resolves to its canonical name — and therefore its encoder and
+# bias offset — regardless of the filename it was saved under. Filename is a
+# fragile identity: a run3 checkpoint saved as `epoch_021.pt` would otherwise
+# lose its bias-offset calibration silently. Identity by content is not.
+CHECKPOINT_SHA256: dict[str, str] = {
+    "bd3ab8f5e273da37a1f2dfc2c6c6a36735b89ae26ff821b71b1f8acce3a74d68":
+        "run3_epoch_021.pt",
+    "17a4cd13358fe98093ad06cb9097d7ced844b305784cc32a6d26ead63dae6577":
+        "run7_hrnet_w18_epoch_021.pt",
+}
 DEFAULT_DECODER_INTERPOLATION = "nearest"
 DEFAULT_PRESENCE_HIDDEN = 128
 
@@ -481,6 +493,22 @@ class _NullContext:
         return False
 
 
+def _canonical_checkpoint_name(path: Path) -> str | None:
+    """Resolve ``path`` to a published checkpoint's canonical filename.
+
+    Matches by filename first, then falls back to hashing the file contents —
+    so a renamed copy of a published checkpoint still resolves to the name that
+    keys its encoder and bias offset. Returns ``None`` for an unrecognized
+    checkpoint.
+    """
+    if path.name in CHECKPOINT_ENCODERS:
+        return path.name
+    import hashlib  # noqa: PLC0415
+
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    return CHECKPOINT_SHA256.get(digest)
+
+
 # --------------------------------------------------------------------------
 # Detector
 # --------------------------------------------------------------------------
@@ -556,36 +584,53 @@ class LaserDetector:
         Args:
             path: Checkpoint file.
             device: Torch device; defaults to CUDA when available.
-            encoder_name: smp encoder backbone. Inferred from the file name
-                when it matches a known published checkpoint.
+            encoder_name: smp encoder backbone. Resolved automatically for a
+                published checkpoint (by content, so a renamed copy still
+                resolves); required for an unrecognized one.
             bias_offset: ``(dx, dy)`` subtracted from the final prediction.
-                Inferred from the file name when known, else ``(0, 0)``.
+                Resolved automatically for a published checkpoint. For an
+                unrecognized checkpoint this is **required** — it is a
+                per-checkpoint calibration that cannot be inferred from the
+                weights, so passing ``(0.0, 0.0)`` is the explicit way to run
+                without one.
             decoder_interpolation: smp UNet decoder upsample mode. The
                 published checkpoints predate this being recorded in the
                 checkpoint config; ``"nearest"`` was the training default.
+
+        Raises:
+            ValueError: If the checkpoint is not a recognized published one and
+                ``encoder_name`` or ``bias_offset`` was not supplied.
         """
         torch = _require_torch()
         path = Path(path)
         checkpoint = torch.load(path, map_location="cpu", weights_only=False)
         cfg = checkpoint.get("cfg") or {}
-        name = path.name
+        # Identify the checkpoint by content, not just filename, so a renamed
+        # copy of a published checkpoint keeps its encoder and bias calibration.
+        canonical = _canonical_checkpoint_name(path)
+        name = canonical or path.name
 
         in_channels = int(cfg.get("in_channels", 6))
         if encoder_name is None:
             encoder_name = CHECKPOINT_ENCODERS.get(name) or cfg.get("encoder_name")
             if encoder_name is None:
                 raise ValueError(
-                    f"cannot infer encoder for checkpoint {name!r}; pass "
-                    "encoder_name= explicitly"
+                    f"cannot infer encoder for unrecognized checkpoint "
+                    f"{path.name!r}; pass encoder_name= explicitly"
                 )
         if bias_offset is None:
-            bias_offset = CHECKPOINT_BIAS_OFFSETS.get(name, (0.0, 0.0))
             if name not in CHECKPOINT_BIAS_OFFSETS:
-                _log.warning(
-                    "no bias offset known for checkpoint %r; using (0, 0). "
-                    "Predictions may carry a constant sub-pixel bias.",
-                    name,
+                # Never silently default to (0, 0): the bias offset is a
+                # per-checkpoint calibration and running without it leaves a
+                # constant sub-pixel error the caller may not notice.
+                raise ValueError(
+                    f"no bias offset known for unrecognized checkpoint "
+                    f"{path.name!r}. It is a per-checkpoint calibration and "
+                    "cannot be inferred from the weights. Pass bias_offset= "
+                    "explicitly, or bias_offset=(0.0, 0.0) to run without one. "
+                    f"Known checkpoints: {sorted(CHECKPOINT_BIAS_OFFSETS)}."
                 )
+            bias_offset = CHECKPOINT_BIAS_OFFSETS[name]
         decoder_interpolation = cfg.get(
             "decoder_interpolation", decoder_interpolation
         )
