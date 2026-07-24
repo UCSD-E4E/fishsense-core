@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.1](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v2.2.0...fishsense_core-v2.2.1) (2026-07-24)
+
+
+### Bug Fixes
+
+* **laser:** identify checkpoints by content, raise on unknown bias offset ([#59](https://github.com/UCSD-E4E/fishsense-core/issues/59)) ([9e02bcd](https://github.com/UCSD-E4E/fishsense-core/commit/9e02bcdcaae915a21d5f9a893b10c7b2303b83bb))
+
 ## [2.2.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v2.1.6...fishsense_core-v2.2.0) (2026-07-23)
 
 
