@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.2](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v2.2.1...fishsense_core-v2.2.2) (2026-07-27)
+
+
+### Bug Fixes
+
+* **packaging:** make the published wheel pip-installable ([#61](https://github.com/UCSD-E4E/fishsense-core/issues/61)) ([4133e9f](https://github.com/UCSD-E4E/fishsense-core/commit/4133e9fcef70440f9568e1bc61aba4ff9dd41a3c))
+
 ## [2.2.1](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v2.2.0...fishsense_core-v2.2.1) (2026-07-24)
 
 
