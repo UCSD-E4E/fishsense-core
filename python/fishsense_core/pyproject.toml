@@ -15,7 +15,6 @@ classifiers = [
 ]
 dynamic = ["version"]
 dependencies = [
-    "fishsense-api-sdk",
     "numpy>=2.3.5",
     "opencv-contrib-python>=4.11.0.86",
     "opencv-python>=4.11.0.86",
@@ -32,6 +31,12 @@ laser-detector = [
     "segmentation-models-pytorch>=0.4",
     "huggingface-hub>=0.26",
 ]
+# RectifiedImage (whole-image undistortion) needs the API SDK's CameraIntrinsics
+# model. The SDK is git-only, so keeping it out of the base deps is what makes
+# the published wheel `pip install`-able at all — a bare `fishsense-api-sdk` in
+# Requires-Dist has no locator and pip cannot resolve it. The laser detector
+# and its own output rectification (raw cv2.undistortPoints) do NOT need it.
+rectified = ["fishsense-api-sdk"]
 
 [tool.uv.sources]
 fishsense-api-sdk = { git = "https://github.com/UCSD-E4E/fishsense-api-sdk.git" }
@@ -46,4 +51,8 @@ dev = [
     "pytest>=9.0.3",
     "pytest-cov>=6.0.0",
     "pytest-timeout>=2.3.1",
+    # Not a base dependency (see [project.optional-dependencies].rectified), but
+    # the test suite covers RectifiedImage, so the dev/CI env needs it. Resolved
+    # from git via [tool.uv.sources].
+    "fishsense-api-sdk",
 ]
