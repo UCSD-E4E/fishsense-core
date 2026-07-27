@@ -443,3 +443,74 @@ def test_from_checkpoint_raises_on_unknown_bias(tmp_path):
     )
     with pytest.raises(ValueError, match="no bias offset known"):
         ld.LaserDetector.from_checkpoint(ckpt, device="cpu")
+
+
+# --------------------------------------------------------------------------
+# Per-camera intrinsics registry (multi-camera rectification)
+#
+# Rectification intrinsics are per-camera; the fleet path resolves them by
+# camera_id from a registry of CameraIntrinsics-like objects. Consuming code
+# reads .camera_matrix / .distortion_coefficients (the same attributes
+# RectifiedImage uses), so the laser core needs no runtime SDK import.
+# --------------------------------------------------------------------------
+
+
+class _FakeIntrinsics:
+    """Stand-in for fishsense_api_sdk's CameraIntrinsics (duck-typed)."""
+
+    def __init__(self, k, dist):
+        self.camera_matrix = k
+        self.distortion_coefficients = dist
+
+
+def _k_dist():
+    k = np.array([[2800.0, 0, 2007.0], [0, 2800.0, 1508.0], [0, 0, 1]])
+    dist = np.array([-0.28, 0.11, 0.0, 0.0, -0.02])
+    return k, dist
+
+
+def test_resolve_intrinsics_by_registered_camera_id():
+    k, dist = _k_dist()
+    registry = {7: _FakeIntrinsics(k, dist)}
+    rk, rd = ld._resolve_rectify_intrinsics(registry, 7, None, None)
+    np.testing.assert_array_equal(rk, k)
+    np.testing.assert_array_equal(rd, dist)
+
+
+def test_resolve_intrinsics_by_explicit_arrays():
+    k, dist = _k_dist()
+    rk, rd = ld._resolve_rectify_intrinsics({}, None, k, dist)
+    np.testing.assert_array_equal(rk, k)
+    np.testing.assert_array_equal(rd, dist)
+
+
+def test_resolve_intrinsics_unknown_camera_id_raises():
+    with pytest.raises(ValueError, match="not registered"):
+        ld._resolve_rectify_intrinsics({1: _FakeIntrinsics(*_k_dist())}, 2, None, None)
+
+
+def test_resolve_intrinsics_requires_a_source():
+    with pytest.raises(ValueError, match="requires either a registered camera_id"):
+        ld._resolve_rectify_intrinsics({}, None, None, None)
+
+
+def test_resolve_intrinsics_rejects_both_sources():
+    k, dist = _k_dist()
+    with pytest.raises(ValueError, match="not both"):
+        ld._resolve_rectify_intrinsics({0: _FakeIntrinsics(k, dist)}, 0, k, dist)
+
+
+def test_resolve_intrinsics_camera_id_and_explicit_agree():
+    """The fleet path and the one-off path must produce identical rectification
+    for the same intrinsics."""
+    k, dist = _k_dist()
+    by_id = ld._resolve_rectify_intrinsics({3: _FakeIntrinsics(k, dist)}, 3, None, None)
+    by_arr = ld._resolve_rectify_intrinsics({}, None, k, dist)
+    p_id = ld.rectify_prediction(1616.3, 1699.7, *by_id)
+    p_arr = ld.rectify_prediction(1616.3, 1699.7, *by_arr)
+    assert p_id == p_arr
+
+
+def test_intrinsics_arrays_rejects_object_without_the_attributes():
+    with pytest.raises(TypeError, match="camera_matrix"):
+        ld._intrinsics_arrays(object())
