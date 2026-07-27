@@ -296,7 +296,6 @@ dependencies = [
 name = "fishsense-core"
 source = { editable = "." }
 dependencies = [
-    { name = "fishsense-api-sdk" },
     { name = "numpy" },
     { name = "opencv-contrib-python" },
     { name = "opencv-python" },
@@ -310,10 +309,14 @@ laser-detector = [
     { name = "segmentation-models-pytorch" },
     { name = "torch" },
 ]
+rectified = [
+    { name = "fishsense-api-sdk" },
+]
 
 [package.dev-dependencies]
 dev = [
     { name = "black" },
+    { name = "fishsense-api-sdk" },
     { name = "pylint" },
     { name = "pytest" },
     { name = "pytest-cov" },
@@ -322,7 +325,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "fishsense-api-sdk", git = "https://github.com/UCSD-E4E/fishsense-api-sdk.git" },
+    { name = "fishsense-api-sdk", marker = "extra == 'rectified'", git = "https://github.com/UCSD-E4E/fishsense-api-sdk.git" },
     { name = "huggingface-hub", marker = "extra == 'laser-detector'", specifier = ">=0.26" },
     { name = "numpy", specifier = ">=2.3.5" },
     { name = "opencv-contrib-python", specifier = ">=4.11.0.86" },
@@ -332,11 +335,12 @@ requires-dist = [
     { name = "segmentation-models-pytorch", marker = "extra == 'laser-detector'", specifier = ">=0.4" },
     { name = "torch", marker = "extra == 'laser-detector'", specifier = ">=2.4" },
 ]
-provides-extras = ["laser-detector"]
+provides-extras = ["laser-detector", "rectified"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "black", specifier = ">=25.12.0" },
+    { name = "fishsense-api-sdk", git = "https://github.com/UCSD-E4E/fishsense-api-sdk.git" },
     { name = "pylint", specifier = ">=4.0.4" },
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "pytest-cov", specifier = ">=6.0.0" },
