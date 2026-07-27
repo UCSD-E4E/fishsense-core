@@ -44,6 +44,7 @@ import numpy as np
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import torch
+    from fishsense_api_sdk.models.camera_intrinsics import CameraIntrinsics
 
 _log = logging.getLogger(__name__)
 
@@ -374,6 +375,60 @@ def soft_snap_to_line(
     return (1.0 - alpha) * x + alpha * proj_x, (1.0 - alpha) * y + alpha * proj_y, alpha
 
 
+def _intrinsics_arrays(intrinsics: "CameraIntrinsics") -> tuple[np.ndarray, np.ndarray]:
+    """Read ``(camera_matrix, distortion_coefficients)`` off an intrinsics object.
+
+    Mirrors how :class:`~fishsense_core.image.rectified_image.RectifiedImage`
+    consumes ``CameraIntrinsics`` — plain attribute access, no SDK call — so the
+    laser core needs no runtime import of the git-only SDK and the wheel stays
+    ``pip install``-able. Anything exposing those two attributes works; the SDK's
+    ``CameraIntrinsics`` (the ``[rectified]`` extra) is the intended source.
+    """
+    try:
+        return intrinsics.camera_matrix, intrinsics.distortion_coefficients
+    except AttributeError as exc:
+        raise TypeError(
+            "camera intrinsics must expose `camera_matrix` and "
+            "`distortion_coefficients` (e.g. fishsense_api_sdk's CameraIntrinsics "
+            "from the `rectified` extra); "
+            f"got {type(intrinsics).__name__}"
+        ) from exc
+
+
+def _resolve_rectify_intrinsics(
+    registry: "dict[int, CameraIntrinsics]",
+    camera_id: int | None,
+    camera_matrix: np.ndarray | None,
+    distortion: np.ndarray | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Pick the ``(K, dist)`` for output rectification.
+
+    Exactly one source must be given: a registered ``camera_id`` (fleet path) or
+    an explicit ``camera_matrix`` + ``distortion`` (one-off / SDK-free path).
+    Kept module-level and torch-free so the resolution rules are unit-testable
+    without loading a model.
+    """
+    has_explicit = camera_matrix is not None and distortion is not None
+    if camera_id is not None:
+        if has_explicit:
+            raise ValueError(
+                "pass either camera_id or camera_matrix/distortion, not both"
+            )
+        if camera_id not in registry:
+            raise ValueError(
+                f"camera_id {camera_id!r} is not registered; call "
+                f"register_camera_intrinsics() first. Known ids: "
+                f"{sorted(registry)}"
+            )
+        return _intrinsics_arrays(registry[camera_id])
+    if has_explicit:
+        return camera_matrix, distortion
+    raise ValueError(
+        "rectify_output=True requires either a registered camera_id or an "
+        "explicit camera_matrix and distortion"
+    )
+
+
 def rectify_prediction(
     pred_x: float, pred_y: float, k: np.ndarray, dist: np.ndarray
 ) -> tuple[float, float]:
@@ -536,8 +591,11 @@ class LaserDetector:
     pixel space because the labeling UI renders via
     ``RectifiedImage(RawImage(...))``. The discrepancy is small (median
     0.02 px, p99 1.01 px) but load-bearing for downstream 3D reconstruction.
-    Pass ``rectify_output=True`` together with ``camera_matrix`` and
-    ``distortion`` to emit rectified coordinates instead.
+    Pass ``rectify_output=True`` to emit rectified coordinates instead,
+    supplying intrinsics either as an explicit ``camera_matrix`` +
+    ``distortion`` (one-off) or via ``camera_id`` after registering per-camera
+    ``CameraIntrinsics`` with :meth:`register_camera_intrinsics` (the fleet
+    path for multi-camera 3D).
     """
 
     # pylint: disable-next=too-many-arguments
@@ -549,9 +607,16 @@ class LaserDetector:
         bias_offset: tuple[float, float] = (0.0, 0.0),
         device: "torch.device | str | None" = None,
         checkpoint_name: str | None = None,
+        camera_intrinsics: "dict[int, CameraIntrinsics] | None" = None,
     ):
         torch = _require_torch()
         self._torch = torch
+        # Per-camera intrinsics for output rectification, keyed by camera_id.
+        # Populate via register_camera_intrinsics() or this kwarg; consumed only
+        # when predict(camera_id=..., rectify_output=True) is used.
+        self.camera_intrinsics: "dict[int, CameraIntrinsics]" = dict(
+            camera_intrinsics or {}
+        )
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = torch.device(device)
@@ -566,6 +631,18 @@ class LaserDetector:
             self.bias_offset,
         )
 
+    def register_camera_intrinsics(
+        self, camera_id: int, intrinsics: "CameraIntrinsics"
+    ) -> None:
+        """Register a camera's intrinsics for ``predict(camera_id=...)``.
+
+        ``intrinsics`` is a ``CameraIntrinsics`` from ``fishsense_api_sdk`` (the
+        ``rectified`` extra), or any object exposing ``camera_matrix`` and
+        ``distortion_coefficients``. Needed only for a fleet doing 3D
+        reconstruction, where each camera has its own calibration.
+        """
+        self.camera_intrinsics[camera_id] = intrinsics
+
     # -- construction -------------------------------------------------------
 
     @classmethod
@@ -578,12 +655,16 @@ class LaserDetector:
         encoder_name: str | None = None,
         bias_offset: tuple[float, float] | None = None,
         decoder_interpolation: str = DEFAULT_DECODER_INTERPOLATION,
+        camera_intrinsics: "dict[int, CameraIntrinsics] | None" = None,
     ) -> "LaserDetector":
         """Load a detector from a local ``.pt`` checkpoint.
 
         Args:
             path: Checkpoint file.
             device: Torch device; defaults to CUDA when available.
+            camera_intrinsics: Optional ``camera_id -> CameraIntrinsics`` map for
+                output rectification; can also be added later via
+                :meth:`register_camera_intrinsics`.
             encoder_name: smp encoder backbone. Resolved automatically for a
                 published checkpoint (by content, so a renamed copy still
                 resolves); required for an unrecognized one.
@@ -650,6 +731,7 @@ class LaserDetector:
             bias_offset=bias_offset,
             device=device,
             checkpoint_name=name,
+            camera_intrinsics=camera_intrinsics,
         )
 
     @classmethod
@@ -1009,6 +1091,7 @@ class LaserDetector:
         use_bf16: bool = False,
         apply_bias_offset: bool = True,
         rectify_output: bool = False,
+        camera_id: int | None = None,
         camera_matrix: np.ndarray | None = None,
         distortion: np.ndarray | None = None,
     ) -> LaserPrediction:
@@ -1049,9 +1132,14 @@ class LaserDetector:
                 reproducibility and mis-pairs with the offset.
             apply_bias_offset: Subtract the checkpoint's calibration offset.
             rectify_output: Return rectified rather than raw pixel
-                coordinates. Requires ``camera_matrix`` and ``distortion``.
-            camera_matrix: 3×3 intrinsics ``K`` for this rig.
-            distortion: Distortion coefficients for this rig.
+                coordinates. Requires intrinsics — supply either ``camera_id``
+                (registered) or ``camera_matrix`` + ``distortion``.
+            camera_id: Registered camera whose intrinsics rectify this frame
+                (see :meth:`register_camera_intrinsics`). The fleet path for
+                multi-camera 3D. Mutually exclusive with ``camera_matrix``/
+                ``distortion``.
+            camera_matrix: 3×3 intrinsics ``K`` for this rig (one-off path).
+            distortion: Distortion coefficients for this rig (one-off path).
 
         Returns:
             A :class:`LaserPrediction` in raw pixel space unless
@@ -1079,9 +1167,13 @@ class LaserDetector:
                 f"bayer_excess shape {bayer_excess.shape[:2]} does not match "
                 f"image shape {image_bgr.shape[:2]}"
             )
-        if rectify_output and (camera_matrix is None or distortion is None):
-            raise ValueError(
-                "rectify_output=True requires camera_matrix and distortion"
+        # Resolve rectification intrinsics up front (before the model runs) so
+        # a misconfigured call fails fast rather than after inference.
+        rectify_k: np.ndarray | None = None
+        rectify_dist: np.ndarray | None = None
+        if rectify_output:
+            rectify_k, rectify_dist = _resolve_rectify_intrinsics(
+                self.camera_intrinsics, camera_id, camera_matrix, distortion
             )
 
         line_abc: tuple[float, float, float] | None = None
@@ -1138,7 +1230,7 @@ class LaserDetector:
         # in raw space, so it has to cancel there before the coordinate-frame
         # conversion happens.
         if rectify_output:
-            x, y = rectify_prediction(x, y, camera_matrix, distortion)
+            x, y = rectify_prediction(x, y, rectify_k, rectify_dist)
 
         return LaserPrediction(x=x, y=y, confidence=pred.confidence)
 
