@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.3.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v2.2.2...fishsense_core-v2.3.0) (2026-07-27)
+
+
+### Features
+
+* **laser:** per-camera intrinsics registry for multi-camera rectification ([#65](https://github.com/UCSD-E4E/fishsense-core/issues/65)) ([0332f5d](https://github.com/UCSD-E4E/fishsense-core/commit/0332f5d0730e6b1d08599357d36ae9511d4c3109))
+
 ## [2.2.2](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v2.2.1...fishsense_core-v2.2.2) (2026-07-27)
 
 

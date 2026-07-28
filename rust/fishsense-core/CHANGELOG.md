@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.3.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v2.2.2...fishsense-core-v2.3.0) (2026-07-27)
+
+
+### Bug Fixes
+
+* **build:** back off and honor Retry-After when fetching the ONNX model ([#63](https://github.com/UCSD-E4E/fishsense-core/issues/63)) ([1f5d6b1](https://github.com/UCSD-E4E/fishsense-core/commit/1f5d6b1ecebf69f728a53a1d31d203a51fa6d3fa))
+
 ## [2.2.2](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v2.2.1...fishsense-core-v2.2.2) (2026-07-27)
 
 
