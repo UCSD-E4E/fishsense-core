@@ -59,7 +59,13 @@ The Python package exposes Rust functions through `fishsense_core._native`. New 
 ```bash
 cargo build            # build all workspace members
 cargo test             # run Rust unit tests
-cargo clippy --all-targets --all-features -- -D warnings   # lint (CI standard)
+# Lint per valid feature set — NOT --all-features. `cuda` (→ ort/load-dynamic)
+# and the default (→ ort/download-binaries) are mutually-exclusive ORT linking
+# modes, and `coreml`'s provider type is macOS-only; combining them drops the
+# execution-provider types (E0433). CI lints these separately per platform.
+cargo clippy --all-targets -- -D warnings                                  # default
+cargo clippy --all-targets --no-default-features --features cuda -- -D warnings    # Linux
+cargo clippy --all-targets --no-default-features --features coreml -- -D warnings  # macOS
 ```
 
 **Python (uv)** — run from `python/fishsense_core/`
