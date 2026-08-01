@@ -59,7 +59,13 @@ The Python package exposes Rust functions through `fishsense_core._native`. New 
 ```bash
 cargo build            # build all workspace members
 cargo test             # run Rust unit tests
-cargo clippy --all-targets --all-features -- -D warnings   # lint (CI standard)
+# Lint default features only — NOT --all-features. `--all-features` fuses
+# `cuda` (→ ort/load-dynamic) with the default (→ ort/download-binaries), two
+# mutually-exclusive ORT linking modes; and under CI's ort resolution the
+# `CUDAExecutionProvider`/`CoreMLExecutionProvider` types aren't exposed even
+# with only their own feature on, so clippy over those sets fails (E0433). The
+# cfg-gated EP blocks are compiled by the `+cu12` release build instead.
+cargo clippy --all-targets -- -D warnings   # lint (CI standard)
 ```
 
 **Python (uv)** — run from `python/fishsense_core/`
