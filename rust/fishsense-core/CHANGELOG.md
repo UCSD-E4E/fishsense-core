@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.4.1](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v2.4.0...fishsense-core-v2.4.1) (2026-08-02)
+
+
+### Bug Fixes
+
+* **build:** pin ort exactly so the +cu12 wheel build can't drift ([#72](https://github.com/UCSD-E4E/fishsense-core/issues/72)) ([d559ad1](https://github.com/UCSD-E4E/fishsense-core/commit/d559ad1d0703707cfa86fb011836f11bc85b62e0))
+
 ## [2.4.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v2.3.0...fishsense-core-v2.4.0) (2026-08-02)
 
 
