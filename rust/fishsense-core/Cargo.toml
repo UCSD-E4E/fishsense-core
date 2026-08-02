@@ -56,6 +56,6 @@ imageproc = { version = "0.25", default-features = false }
 # against — the `download-binaries` build gets it transitively (it fetches
 # ms@1.24), but the `cuda` (load-dynamic) build links no ORT, so pin it here
 # explicitly or `ort`'s newer-EP bindings fail to compile.
-ort = { version = "2.0.0-rc.12", default-features = false, features = ["ndarray", "api-24"] }
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["ndarray", "api-24"] }
 thiserror = "2.0.17"
 tracing = "0.1"
