@@ -312,6 +312,10 @@ laser-detector = [
 rectified = [
     { name = "fishsense-api-sdk" },
 ]
+slate = [
+    { name = "huggingface-hub" },
+    { name = "torch" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -327,6 +331,7 @@ dev = [
 requires-dist = [
     { name = "fishsense-api-sdk", marker = "extra == 'rectified'", git = "https://github.com/UCSD-E4E/fishsense-api-sdk.git" },
     { name = "huggingface-hub", marker = "extra == 'laser-detector'", specifier = ">=0.26" },
+    { name = "huggingface-hub", marker = "extra == 'slate'", specifier = ">=0.26" },
     { name = "numpy", specifier = ">=2.3.5" },
     { name = "opencv-contrib-python", specifier = ">=4.11.0.86" },
     { name = "opencv-python", specifier = ">=4.11.0.86" },
@@ -334,8 +339,9 @@ requires-dist = [
     { name = "scikit-image", specifier = ">=0.25.2" },
     { name = "segmentation-models-pytorch", marker = "extra == 'laser-detector'", specifier = ">=0.4" },
     { name = "torch", marker = "extra == 'laser-detector'", specifier = ">=2.4" },
+    { name = "torch", marker = "extra == 'slate'", specifier = ">=2.4" },
 ]
-provides-extras = ["laser-detector", "rectified"]
+provides-extras = ["laser-detector", "rectified", "slate"]
 
 [package.metadata.requires-dev]
 dev = [

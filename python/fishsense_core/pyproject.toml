@@ -37,6 +37,15 @@ laser-detector = [
 # Requires-Dist has no locator and pip cannot resolve it. The laser detector
 # and its own output rectification (raw cv2.undistortPoints) do NOT need it.
 rectified = ["fishsense-api-sdk"]
+# The slate board-mask (fishsense_core.slate.BoardMasker) runs a small CPU
+# PyTorch checkpoint from HuggingFace. The classical estimator
+# (estimate_plane) is base and needs none of this; the mask is optional and
+# only adds search candidates (board_mask=None degrades ~13 pts, never breaks).
+# No torchvision, no CUDA — this model is CPU-only.
+slate = [
+    "torch>=2.4",
+    "huggingface-hub>=0.26",
+]
 
 [tool.uv.sources]
 fishsense-api-sdk = { git = "https://github.com/UCSD-E4E/fishsense-api-sdk.git" }
