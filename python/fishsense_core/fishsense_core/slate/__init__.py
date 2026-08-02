@@ -20,12 +20,16 @@ from fishsense_core.slate.estimator import (
     segment_board,
     template_corners,
 )
+from fishsense_core.slate.mask import BoardMasker, build_unet, preprocess
 
 __all__ = [
     "BoardEstimate",
+    "BoardMasker",
+    "build_unet",
     "estimate_plane",
     "homography_from_quad",
     "order_quad",
+    "preprocess",
     "rotate_quad",
     "segment_board",
     "template_corners",
