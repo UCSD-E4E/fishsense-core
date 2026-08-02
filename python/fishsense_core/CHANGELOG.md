@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.4.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v2.3.0...fishsense_core-v2.4.0) (2026-08-02)
+
+
+### Features
+
+* **plane:** board-plane primitive bridging slate pose to laser calibration ([#66](https://github.com/UCSD-E4E/fishsense-core/issues/66)) ([d8e1ddc](https://github.com/UCSD-E4E/fishsense-core/commit/d8e1ddcb88e402b8801edf33f01cff514d43f301))
+* **slate:** BoardMasker board-mask checkpoint behind a [slate] extra ([#71](https://github.com/UCSD-E4E/fishsense-core/issues/71)) ([213b7fb](https://github.com/UCSD-E4E/fishsense-core/commit/213b7fbbf7e92e1e10ceeebfda4a5c0ca059e79c))
+* **slate:** classical board-plane estimator (CPU, base install) ([#69](https://github.com/UCSD-E4E/fishsense-core/issues/69)) ([4808151](https://github.com/UCSD-E4E/fishsense-core/commit/480815187294d199a2fa5d6e79e6d6f72c6b6a9f))
+
+
+### Bug Fixes
+
+* **deps:** single headless OpenCV, not conflicting opencv-python + contrib ([#70](https://github.com/UCSD-E4E/fishsense-core/issues/70)) ([46224bc](https://github.com/UCSD-E4E/fishsense-core/commit/46224bc94c0890850175c3bba2098c92f4aed26d))
+
 ## [2.3.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v2.2.2...fishsense_core-v2.3.0) (2026-07-27)
 
 
