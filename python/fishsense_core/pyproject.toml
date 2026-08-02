@@ -16,8 +16,14 @@ classifiers = [
 dynamic = ["version"]
 dependencies = [
     "numpy>=2.3.5",
-    "opencv-contrib-python>=4.11.0.86",
-    "opencv-python>=4.11.0.86",
+    # Single headless OpenCV. Previously both opencv-python AND
+    # opencv-contrib-python were declared: contrib is a superset of the base, so
+    # one is redundant, and both install into `cv2/`, so which wins is
+    # install-order dependent. Both are also non-headless, pulling X libraries
+    # (libxcb.so.1 etc.) that a worker/headless container lacks. fishsense-core
+    # uses no GUI (imshow/waitKey) and no contrib-only modules (aruco/ximgproc/…),
+    # so the headless base build is correct, single, and container-safe.
+    "opencv-python-headless>=4.11.0.86",
     "rawpy>=0.25.1",
     "scikit-image>=0.25.2",
 ]
