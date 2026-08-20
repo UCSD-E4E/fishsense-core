@@ -63,6 +63,28 @@ impl WorldPointHandler {
         let result = self.inner.compute_world_point_from_laser(&origin, &axis, &pt);
         Ok(result.mapv(|v| v as f64).into_pyarray(py))
     }
+
+    /// Returns `(point, residual)` — the triangulated point plus the closest-approach
+    /// distance between the camera ray and the laser line. The residual is the signal
+    /// that separates a real laser dot from a pixel this calibration cannot explain.
+    fn compute_world_point_from_laser_with_residual<'py>(
+        &self,
+        py: Python<'py>,
+        laser_origin: PyReadonlyArrayDyn<'py, f64>,
+        laser_axis: PyReadonlyArrayDyn<'py, f64>,
+        image_point: PyReadonlyArrayDyn<'py, f64>,
+    ) -> PyResult<(Bound<'py, PyArray1<f64>>, f64)> {
+        let origin = to_array1_f32(laser_origin, "laser_origin")?;
+        let axis = to_array1_f32(laser_axis, "laser_axis")?;
+        let pt = to_array1_f32(image_point, "image_point")?;
+        let result = self
+            .inner
+            .compute_world_point_from_laser_with_residual(&origin, &axis, &pt);
+        Ok((
+            result.point.mapv(|v| v as f64).into_pyarray(py),
+            result.residual as f64,
+        ))
+    }
 }
 
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {

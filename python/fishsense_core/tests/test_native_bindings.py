@@ -116,6 +116,7 @@ class TestWorldPointHandler:
 
     # -- laser triangulation ------------------------------------------------
 
+    @staticmethod
     def _laser_scene():
         """A camera, a laser at (0.104, 0, 0), and a dot it puts at (0.2, 0.1, 1.5)."""
         k = np.array([[2000.0, 0.0, 1000.0], [0.0, 2000.0, 750.0], [0.0, 0.0, 1.0]])
@@ -142,6 +143,7 @@ class TestWorldPointHandler:
         np.testing.assert_allclose(raw, target, atol=1e-3)
         np.testing.assert_allclose(raw, unit, atol=1e-5)
 
+    @pytest.mark.parametrize("scale", [0.5, 2.0, 4.0, 10.0])
     def test_compute_world_point_from_laser_scale_invariant(self, scale):
         """Scaling a unit axis is a no-op; it used to flip the depth's sign."""
         handler, origin, target, pixel = self._laser_scene()
@@ -165,6 +167,199 @@ class TestWorldPointHandler:
             handler.compute_world_point_from_laser(
                 origin, np.array([np.nan, 0.0, 1.0]), pixel
             )
+
+    def test_residual_variant_agrees_with_plain_call(self):
+        """The companion returns the same point, plus a plain float residual."""
+        handler, origin, target, pixel = self._laser_scene()
+        axis = target - origin
+        point, residual = handler.compute_world_point_from_laser_with_residual(
+            origin, axis, pixel
+        )
+        np.testing.assert_array_equal(
+            point, handler.compute_world_point_from_laser(origin, axis, pixel)
+        )
+        assert isinstance(residual, float)
+
+    def test_residual_is_small_for_a_consistent_dot(self):
+        """The dot really is on the laser line, so the rays meet."""
+        handler, origin, target, pixel = self._laser_scene()
+        point, residual = handler.compute_world_point_from_laser_with_residual(
+            origin, target - origin, pixel
+        )
+        np.testing.assert_allclose(point, target, atol=1e-3)
+        assert residual < 1e-3
+
+    def test_residual_is_the_closest_approach_distance(self):
+        """Identity K⁻¹: image (0,0) looks along -z; a laser line 1 unit off in y
+        passes exactly 1 unit from that ray."""
+        handler = self._identity()
+        point, residual = handler.compute_world_point_from_laser_with_residual(
+            np.array([1.0, 1.0, -2.0]),  # laser_origin, lifted 1 in y
+            np.array([1.0, 0.0, 0.0]),  # laser_axis
+            np.array([0.0, 0.0]),  # image_point
+        )
+        np.testing.assert_allclose(point, [0.0, 0.0, -2.0], atol=1e-5)
+        np.testing.assert_allclose(residual, 1.0, atol=1e-5)
+
+    def test_residual_is_zero_when_the_rays_meet(self):
+        """Laser line y=0, z=-2 crosses the camera ray through image (0,0)."""
+        _, residual = self._identity().compute_world_point_from_laser_with_residual(
+            np.array([1.0, 0.0, -2.0]), np.array([3.0, 0.0, 0.0]), np.array([0.0, 0.0])
+        )
+        np.testing.assert_allclose(residual, 0.0, atol=1e-5)
+
+    def test_residual_variant_int_inputs(self):
+        """Same float64 coercion contract as the rest of the wrapper."""
+        point, residual = self._identity().compute_world_point_from_laser_with_residual(
+            np.array([0, 0, -2]), np.array([1, 0, 0]), np.array([0, 0])
+        )
+        np.testing.assert_allclose(point, [0.0, 0.0, -2.0], atol=1e-5)
+        assert residual == pytest.approx(0.0, abs=1e-5)
+
+    @pytest.mark.parametrize("bad_axis", [np.zeros(3), np.array([np.nan, 0.0, 1.0])])
+    def test_residual_variant_rejects_degenerate_axis(self, bad_axis):
+        """Validation must not be limited to the plain call."""
+        handler, origin, _, pixel = self._laser_scene()
+        with pytest.raises(ValueError):
+            handler.compute_world_point_from_laser_with_residual(origin, bad_axis, pixel)
+
+    def test_residual_variant_output_types(self):
+        """Pins the float64/(3,)/float contract the rest of the wrapper promises."""
+        handler, origin, target, pixel = self._laser_scene()
+        point, residual = handler.compute_world_point_from_laser_with_residual(
+            origin, target - origin, pixel
+        )
+        assert point.shape == (3,)
+        assert point.dtype == np.float64
+        assert isinstance(residual, float)
+        # ...and the plain call keeps the same dtype contract
+        plain = handler.compute_world_point_from_laser(origin, target - origin, pixel)
+        assert plain.dtype == np.float64
+
+    def test_residual_is_blind_to_error_along_the_epipolar_line(self):
+        """The documented blind spot, pinned where callers will rely on it.
+
+        The laser sweeps out the image line v = 883.33 here, so moving the dot
+        100 px in u stays on that line: the residual sees nothing while the
+        depth collapses from 1.5 m to ~0.87 m. A residual check alone cannot
+        catch a dot mislabelled along the laser.
+        """
+        handler, origin, target, pixel = self._laser_scene()
+        point, residual = handler.compute_world_point_from_laser_with_residual(
+            origin, target - origin, pixel + np.array([100.0, 0.0])
+        )
+        assert residual < 1e-4
+        assert abs(point[2] - 1.5) > 0.5
+
+    def test_residual_flags_error_across_the_epipolar_line(self):
+        """The half it does catch: 10 px of transverse error is millimetres of residual."""
+        handler, origin, target, pixel = self._laser_scene()
+        clean = handler.compute_world_point_from_laser_with_residual(
+            origin, target - origin, pixel
+        )[1]
+        offset = handler.compute_world_point_from_laser_with_residual(
+            origin, target - origin, pixel + np.array([0.0, 10.0])
+        )[1]
+        assert clean < 1e-4
+        assert offset > 5e-3
+
+    def test_a_small_residual_can_still_mean_a_useless_point(self):
+        """Issue 2's example: a dot on the wrong side of the principal point.
+
+        The rays nearly meet — a few centimetres — but behind the camera, so the
+        residual must be paired with a positive-depth check, not trusted alone.
+        """
+        handler, _, _, _ = self._laser_scene()
+        point, residual = handler.compute_world_point_from_laser_with_residual(
+            np.array([0.104, 0.0, 0.0]), np.array([0.0, 0.0, 1.0]), np.array([800.0, 700.0])
+        )
+        assert point[2] < 0
+        assert residual < 0.1
+
+    def test_a_zeroed_calibration_row_reports_a_perfect_residual(self):
+        """The residual's worst failure mode, pinned where callers will meet it.
+
+        An all-zero ``laser_origin`` has no baseline, so every pixel triangulates
+        to the camera centre with residual 0 — a residual threshold alone would
+        pass a whole dive of garbage. The depth check is what catches it.
+        """
+        handler, _, target, pixel = self._laser_scene()
+        for image_point in (pixel, np.array([400.0, 200.0]), np.array([1900.0, 1400.0])):
+            point, residual = handler.compute_world_point_from_laser_with_residual(
+                np.zeros(3), target, image_point
+            )
+            assert residual < 1e-6
+            np.testing.assert_allclose(point, [0.0, 0.0, 0.0], atol=1e-6)
+            assert not point[2] > 0  # ...but the depth check rejects it
+
+    @pytest.mark.parametrize(
+        "origin,pixel_x",
+        [(np.array([0.104, 0.0, 0.0]), np.nan), (np.array([np.nan, 0.0, 0.0]), 1266.6667)],
+    )
+    def test_non_finite_inputs_propagate(self, origin, pixel_x):
+        """A NaN from a failed detector must not come back as a finite-looking point."""
+        handler, _, target, _ = self._laser_scene()
+        point, residual = handler.compute_world_point_from_laser_with_residual(
+            origin, target - np.array([0.104, 0.0, 0.0]), np.array([pixel_x, 883.3333])
+        )
+        assert not np.isfinite(point).any()
+        assert not np.isfinite(residual)
+
+    def test_accepts_non_contiguous_and_fortran_order_inputs(self):
+        """Sliced views and F-order arrays are ordinary caller inputs; the numpy
+        marshalling must handle their strides, not just packed C-order buffers."""
+        k = np.array([[2000.0, 0.0, 1000.0], [0.0, 2000.0, 750.0], [0.0, 0.0, 1.0]])
+        origin = np.array([0.104, 0.0, 0.0])
+        axis = np.array([0.096, 0.1, 1.5])
+        pixel = np.array([1266.6667, 883.3333])
+
+        packed = WorldPointHandler(np.linalg.inv(k)).compute_world_point_from_laser(
+            origin, axis, pixel
+        )
+        strided = WorldPointHandler(
+            np.asfortranarray(np.linalg.inv(k))
+        ).compute_world_point_from_laser(
+            np.array([0.104, 9.0, 0.0, 9.0, 0.0, 9.0])[::2],  # non-contiguous view
+            axis,
+            np.array([1266.6667, 0.0, 883.3333])[::2],
+        )
+        np.testing.assert_allclose(strided, packed, atol=1e-6)
+
+    def test_triangulation_round_trips_a_calibrated_laser(self):
+        """End-to-end over the seam the bug lived on: calibrate → project → triangulate.
+
+        ``calibrate_laser`` returns some point on the fitted line plus a unit
+        direction; neither which point nor which way it faces may affect the
+        answer, and the recovered 3D point must be the one that was projected.
+        """
+        k = np.array([[2000.0, 0.0, 1000.0], [0.0, 2000.0, 750.0], [0.0, 0.0, 1.0]])
+        handler = WorldPointHandler(np.linalg.inv(k))
+
+        base = np.array([0.104, 0.0, 0.0])
+        direction = np.array([0.096, 0.1, 1.5])
+        direction = direction / np.linalg.norm(direction)
+        on_line = np.array([base + s * direction for s in (1.0, 1.4, 1.8)])
+
+        origin, orientation = calibrate_laser(on_line.astype(np.float32))
+
+        expected = base + 1.4 * direction
+        pixel = (k @ expected)[:2] / (k @ expected)[2]
+        point, residual = handler.compute_world_point_from_laser_with_residual(
+            origin, orientation, pixel
+        )
+
+        np.testing.assert_allclose(point, expected, atol=1e-3)
+        assert residual < 1e-3
+
+    def test_parallel_laser_and_camera_ray_are_not_finite(self):
+        """No unique closest point — the caller must be able to see that."""
+        point, residual = self._identity().compute_world_point_from_laser_with_residual(
+            np.array([0.104, 0.0, 0.0]),  # laser offset from the camera centre
+            np.array([0.0, 0.0, 1.0]),  # ...aimed parallel to the camera ray
+            np.array([0.0, 0.0]),
+        )
+        assert not np.isfinite(point).any()
+        assert not np.isfinite(residual)
 
 
 # ---------------------------------------------------------------------------
