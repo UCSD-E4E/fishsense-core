@@ -50,6 +50,16 @@ from fishsense_core.laser import calibrate_laser
 points = np.array([...], dtype=np.float32)  # shape (N, 3)
 origin, orientation = calibrate_laser(points)
 
+# Laser triangulation — laser_axis is a direction of any non-zero length
+from fishsense_core.world_point import WorldPointHandler
+handler = WorldPointHandler(np.linalg.inv(camera_matrix))
+point = handler.compute_world_point_from_laser(origin, orientation, laser_pixel)
+# ...or with the closest-approach distance, to tell a real dot from a pixel
+# this calibration cannot explain:
+point, residual = handler.compute_world_point_from_laser_with_residual(
+    origin, orientation, laser_pixel
+)
+
 # Image loading
 from pathlib import Path
 from fishsense_core.image.raw_image import RawImage
