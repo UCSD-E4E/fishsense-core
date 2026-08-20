@@ -29,7 +29,22 @@ pub struct WorldPointHandler {
 impl WorldPointHandler {
     /// Project an image-space coordinate into camera-space via K⁻¹ · [x, y, 1].
     /// Result is the un-scaled ray (no depth applied).
+    ///
+    /// # Panics
+    /// If `image_coordinate` is not `[x, y]`, or `camera_intrinsics_inverted` is not
+    /// 3×3. A homogeneous `[x, y, w]` pixel is a mistake worth hearing about, not a
+    /// third element to drop.
     pub fn project_image_point(&self, image_coordinate: &Array1<f32>) -> Array1<f32> {
+        assert_eq!(
+            self.camera_intrinsics_inverted.dim(),
+            (3, 3),
+            "camera_intrinsics_inverted must be 3x3"
+        );
+        assert_eq!(
+            image_coordinate.len(),
+            2,
+            "image_coordinate must be [x, y]"
+        );
         self.camera_intrinsics_inverted.dot(&array![image_coordinate[0], image_coordinate[1], 1f32])
     }
 
@@ -67,12 +82,19 @@ impl WorldPointHandler {
     /// Uses the least-squares closest-point formulation between the camera ray and the
     /// laser line, matching the convention where the camera looks down -z (hence the
     /// sign flip on the projected point).
+    ///
+    /// # Panics
+    /// If `laser_origin` or `laser_axis` is not a 3-vector, or `image_coordinate` is
+    /// not `[x, y]`.
     pub fn compute_world_point_from_laser_with_residual(
         &self,
         laser_origin: &Array1<f32>,
         laser_axis: &Array1<f32>,
         image_coordinate: &Array1<f32>,
     ) -> LaserTriangulation {
+        assert_eq!(laser_origin.len(), 3, "laser_origin must be a 3-vector");
+        assert_eq!(laser_axis.len(), 3, "laser_axis must be a 3-vector");
+
         let projected_point = self.project_image_point(image_coordinate);
         let norm = projected_point.dot(&projected_point).sqrt();
         let camera_axis: Array1<f32> = projected_point.mapv(|v| -v / norm);
@@ -431,6 +453,50 @@ mod tests {
             "expected the camera centre, got {}",
             result.point
         );
+    }
+
+    /// A homogeneous `[x, y, w]` pixel used to lose its `w` silently, which is the
+    /// same class of quiet wrong answer as the non-unit `laser_axis` bug.
+    #[test]
+    #[should_panic(expected = "image_coordinate must be [x, y]")]
+    fn project_image_point_rejects_a_homogeneous_pixel() {
+        let identity = array![[1.0_f32, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let handler = WorldPointHandler { camera_intrinsics_inverted: identity };
+        handler.project_image_point(&array![6.0_f32, 8.0, 2.0]);
+    }
+
+    /// Mis-shaped extrinsics used to panic deep inside ndarray's dot product.
+    #[test]
+    #[should_panic(expected = "laser_origin must be a 3-vector")]
+    fn compute_world_point_from_laser_rejects_a_2d_laser_origin() {
+        let identity = array![[1.0_f32, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let handler = WorldPointHandler { camera_intrinsics_inverted: identity };
+        handler.compute_world_point_from_laser(
+            &array![0.104_f32, 0.0],
+            &array![1.0_f32, 0.0, 0.0],
+            &array![0.0_f32, 0.0],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "laser_axis must be a 3-vector")]
+    fn compute_world_point_from_laser_rejects_a_4d_laser_axis() {
+        let identity = array![[1.0_f32, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let handler = WorldPointHandler { camera_intrinsics_inverted: identity };
+        handler.compute_world_point_from_laser(
+            &array![0.104_f32, 0.0, 0.0],
+            &array![1.0_f32, 0.0, 0.0, 0.0],
+            &array![0.0_f32, 0.0],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "camera_intrinsics_inverted must be 3x3")]
+    fn project_image_point_rejects_non_3x3_intrinsics() {
+        let handler = WorldPointHandler {
+            camera_intrinsics_inverted: array![[1.0_f32, 0.0], [0.0, 1.0]],
+        };
+        handler.project_image_point(&array![3.0_f32, 4.0]);
     }
 
     /// The residual's worst failure: with no baseline (an all-zero `laser_origin`,

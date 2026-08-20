@@ -15,6 +15,11 @@ wrapper handles the conversion. The native binding accepts ``float64`` only;
 without this coercion, callers passing integer-dtype arrays hit a TypeError
 from PyO3-numpy at the binding boundary.
 
+**Input shape:** ``camera_intrinsics_inverted`` must be 3×3, ``image_point``
+``[x, y]``, and ``laser_origin`` / ``laser_axis`` 3-vectors. Anything else is a
+``ValueError`` from the native binding — in particular a homogeneous
+``[x, y, w]`` pixel, whose ``w`` used to be dropped without complaint.
+
 **Laser axis:** ``laser_axis`` is a *direction*. Its magnitude does not affect
 the result — the native solve normalises it — so a raw ``target - origin``
 difference works as well as the unit vector

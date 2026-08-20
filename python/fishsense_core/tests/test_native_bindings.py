@@ -114,6 +114,41 @@ class TestWorldPointHandler:
         result = h.project_image_point([3, 4])
         np.testing.assert_allclose(result, [3.0, 4.0, 1.0])
 
+    # -- input shape ---------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "bad_pixel",
+        [
+            np.array([1200.0, 800.0, 1.0]),  # homogeneous — the w used to be dropped
+            np.array([1200.0]),
+            np.array([[1200.0, 800.0]]),  # 2-D
+        ],
+    )
+    def test_image_point_must_be_xy(self, bad_pixel):
+        """A mis-shaped pixel is a ValueError, not a silent truncation or a panic."""
+        with pytest.raises(ValueError):
+            self._identity().project_image_point(bad_pixel)
+
+    @pytest.mark.parametrize("bad_origin", [np.array([0.1, 0.0]), np.array([0.1, 0.0, 0.0, 0.0])])
+    def test_laser_origin_must_be_a_3_vector(self, bad_origin):
+        """Used to panic inside ndarray's dot product (PanicException in Python)."""
+        with pytest.raises(ValueError):
+            self._identity().compute_world_point_from_laser(
+                bad_origin, np.array([1.0, 0.0, 0.0]), np.array([0.0, 0.0])
+            )
+
+    @pytest.mark.parametrize("bad_axis", [np.array([1.0, 0.0]), np.array([1.0, 0.0, 0.0, 0.0])])
+    def test_laser_axis_must_be_a_3_vector(self, bad_axis):
+        with pytest.raises(ValueError):
+            self._identity().compute_world_point_from_laser_with_residual(
+                np.array([0.0, 0.0, -2.0]), bad_axis, np.array([0.0, 0.0])
+            )
+
+    @pytest.mark.parametrize("bad_k_inv", [np.eye(2), np.eye(4), np.ones(9)])
+    def test_intrinsics_must_be_3x3(self, bad_k_inv):
+        with pytest.raises(ValueError):
+            WorldPointHandler(bad_k_inv)
+
     # -- laser triangulation ------------------------------------------------
 
     @staticmethod
