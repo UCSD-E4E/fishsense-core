@@ -17,7 +17,12 @@ impl WorldPointHandler {
     }
 
     /// Triangulate the 3D point seen at `image_coordinate` against a known laser line
-    /// (defined by `laser_origin` and unit `laser_axis` in camera space).
+    /// (defined by `laser_origin` and `laser_axis` in camera space).
+    ///
+    /// `laser_axis` is a direction: any non-zero length is accepted and normalised
+    /// internally, so the result does not depend on its magnitude. A zero-length axis
+    /// has no direction and yields a non-finite point rather than a plausible wrong one.
+    ///
     /// Uses the least-squares closest-point formulation between the camera ray and the laser line,
     /// matching the convention where the camera looks down -z (hence the sign flip on the projected point).
     pub fn compute_world_point_from_laser(
@@ -28,15 +33,22 @@ impl WorldPointHandler {
     ) -> Array1<f32> {
         let projected_point = self.project_image_point(image_coordinate);
         let norm = projected_point.dot(&projected_point).sqrt();
-        let final_laser_axis: Array1<f32> = projected_point.mapv(|v| -v / norm);
+        let camera_axis: Array1<f32> = projected_point.mapv(|v| -v / norm);
 
-        let dot_fla_lo = final_laser_axis.dot(laser_origin);
-        let dot_la_lo = laser_axis.dot(laser_origin);
-        let dot_la_fla = laser_axis.dot(&final_laser_axis);
+        // The magnitude of a direction carries no meaning, but the closed form below is
+        // only valid for a unit axis: normalise rather than silently returning a point
+        // scaled by an arbitrary factor. ||laser_axis|| == 0 normalises to NaN, which
+        // propagates to the result instead of looking like an ordinary shallow depth.
+        let axis_norm = laser_axis.dot(laser_axis).sqrt();
+        let unit_laser_axis: Array1<f32> = laser_axis.mapv(|v| v / axis_norm);
 
-        let point_constant = (dot_fla_lo - dot_la_lo * dot_la_fla) / (1.0 - dot_la_fla * dot_la_fla);
+        let dot_ca_lo = camera_axis.dot(laser_origin);
+        let dot_la_lo = unit_laser_axis.dot(laser_origin);
+        let dot_la_ca = unit_laser_axis.dot(&camera_axis);
 
-        final_laser_axis.mapv(|v| v * point_constant)
+        let point_constant = (dot_ca_lo - dot_la_lo * dot_la_ca) / (1.0 - dot_la_ca * dot_la_ca);
+
+        camera_axis.mapv(|v| v * point_constant)
     }
 }
 
@@ -121,5 +133,55 @@ mod tests {
         assert!((result[0] - 0.0).abs() < 1e-5, "x: {}", result[0]);
         assert!((result[1] - 0.0).abs() < 1e-5, "y: {}", result[1]);
         assert!((result[2] - (-2.0)).abs() < 1e-5, "z: {}", result[2]);
+    }
+
+    /// Regression: `laser_axis` is a direction, so its magnitude must not change the
+    /// answer. Before normalisation an axis of length 1.5 put a 1.5 m dot at ~1 mm.
+    #[test]
+    fn compute_world_point_from_laser_ignores_axis_magnitude() {
+        // K = [[2000, 0, 1000], [0, 2000, 750], [0, 0, 1]]
+        let k_inv = array![[0.0005_f32, 0.0, -0.5], [0.0, 0.0005, -0.375], [0.0, 0.0, 1.0]];
+        let handler = WorldPointHandler { camera_intrinsics_inverted: k_inv };
+
+        // Laser at (0.104, 0, 0) aimed at (0.2, 0.1, 1.5); the dot is at the target.
+        let laser_origin = array![0.104_f32, 0.0, 0.0];
+        let target = array![0.2_f32, 0.1, 1.5];
+        let axis = &target - &laser_origin; // ||axis|| == 1.5064, not 1
+        let image_point = array![1_266.666_7_f32, 883.333_3];
+
+        let unit_axis = {
+            let n = axis.dot(&axis).sqrt();
+            axis.mapv(|v| v / n)
+        };
+
+        let from_raw = handler.compute_world_point_from_laser(&laser_origin, &axis, &image_point);
+        let from_unit = handler.compute_world_point_from_laser(&laser_origin, &unit_axis, &image_point);
+
+        for i in 0..3 {
+            assert!((from_raw[i] - target[i]).abs() < 1e-3, "axis {i}: expected {}, got {}", target[i], from_raw[i]);
+            assert!((from_raw[i] - from_unit[i]).abs() < 1e-5, "axis {i}: raw {} != unit {}", from_raw[i], from_unit[i]);
+        }
+
+        // ...and scaling a unit axis is likewise a no-op.
+        for k in [0.5_f32, 2.0, 10.0] {
+            let scaled = handler.compute_world_point_from_laser(&laser_origin, &unit_axis.mapv(|v| v * k), &image_point);
+            for i in 0..3 {
+                assert!((scaled[i] - from_unit[i]).abs() < 1e-4, "k={k} axis {i}: {} != {}", scaled[i], from_unit[i]);
+            }
+        }
+    }
+
+    /// A zero-length axis has no direction: the answer must be non-finite rather than
+    /// an ordinary-looking shallow point.
+    #[test]
+    fn compute_world_point_from_laser_zero_axis_is_not_finite() {
+        let identity = array![[1.0_f32, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let handler = WorldPointHandler { camera_intrinsics_inverted: identity };
+        let result = handler.compute_world_point_from_laser(
+            &array![0.104_f32, 0.0, 0.0],
+            &array![0.0_f32, 0.0, 0.0],
+            &array![10.0_f32, 20.0],
+        );
+        assert!(result.iter().all(|v| !v.is_finite()), "expected non-finite, got {result}");
     }
 }

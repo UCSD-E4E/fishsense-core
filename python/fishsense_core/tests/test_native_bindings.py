@@ -114,6 +114,58 @@ class TestWorldPointHandler:
         result = h.project_image_point([3, 4])
         np.testing.assert_allclose(result, [3.0, 4.0, 1.0])
 
+    # -- laser triangulation ------------------------------------------------
+
+    def _laser_scene():
+        """A camera, a laser at (0.104, 0, 0), and a dot it puts at (0.2, 0.1, 1.5)."""
+        k = np.array([[2000.0, 0.0, 1000.0], [0.0, 2000.0, 750.0], [0.0, 0.0, 1.0]])
+        handler = WorldPointHandler(np.linalg.inv(k))
+        origin = np.array([0.104, 0.0, 0.0])
+        target = np.array([0.2, 0.1, 1.5])
+        pixel = (k @ target)[:2] / (k @ target)[2]
+        return handler, origin, target, pixel
+
+    def test_compute_world_point_from_laser_ignores_axis_magnitude(self):
+        """Regression: a non-unit axis used to put a 1.5 m dot at ~1 mm.
+
+        ``laser_axis`` is a direction — ``target - origin`` (norm 1.5064) must
+        triangulate to the same point as the unit vector calibration returns.
+        """
+        handler, origin, target, pixel = self._laser_scene()
+        axis = target - origin
+        assert not np.isclose(np.linalg.norm(axis), 1.0)  # the whole point
+
+        raw = handler.compute_world_point_from_laser(origin, axis, pixel)
+        unit = handler.compute_world_point_from_laser(
+            origin, axis / np.linalg.norm(axis), pixel
+        )
+        np.testing.assert_allclose(raw, target, atol=1e-3)
+        np.testing.assert_allclose(raw, unit, atol=1e-5)
+
+    def test_compute_world_point_from_laser_scale_invariant(self, scale):
+        """Scaling a unit axis is a no-op; it used to flip the depth's sign."""
+        handler, origin, target, pixel = self._laser_scene()
+        unit = (target - origin) / np.linalg.norm(target - origin)
+        np.testing.assert_allclose(
+            handler.compute_world_point_from_laser(origin, unit * scale, pixel),
+            handler.compute_world_point_from_laser(origin, unit, pixel),
+            atol=1e-4,
+        )
+
+    def test_compute_world_point_from_laser_rejects_zero_axis(self):
+        """A zero axis points nowhere — it must not answer with a ~1 cm depth."""
+        handler, origin, _, pixel = self._laser_scene()
+        with pytest.raises(ValueError):
+            handler.compute_world_point_from_laser(origin, np.zeros(3), pixel)
+
+    def test_compute_world_point_from_laser_rejects_non_finite_axis(self):
+        """NaN in the axis is a broken calibration row, not a direction."""
+        handler, origin, _, pixel = self._laser_scene()
+        with pytest.raises(ValueError):
+            handler.compute_world_point_from_laser(
+                origin, np.array([np.nan, 0.0, 1.0]), pixel
+            )
+
 
 # ---------------------------------------------------------------------------
 # FishHeadTailDetector
