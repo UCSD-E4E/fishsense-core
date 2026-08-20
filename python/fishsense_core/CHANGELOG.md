@@ -1,5 +1,16 @@
 # Changelog
 
+## [3.0.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v2.4.1...fishsense_core-v3.0.0) (2026-08-20)
+
+
+### ⚠ BREAKING CHANGES
+
+* **world_point:** a homogeneous [x, y, w] image point is now rejected rather than truncated to [x, y], and mis-shaped arrays raise ValueError instead of panicking. Callers relying on the truncation must slice to [x, y] themselves.
+
+### Features
+
+* **world_point:** normalise laser_axis, return a triangulation residual, validate shapes ([#74](https://github.com/UCSD-E4E/fishsense-core/issues/74)) ([b66318b](https://github.com/UCSD-E4E/fishsense-core/commit/b66318b6270f54c5d59a67cbbec721f0e5ebfbcc))
+
 ## [2.4.1](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v2.4.0...fishsense_core-v2.4.1) (2026-08-02)
 
 
