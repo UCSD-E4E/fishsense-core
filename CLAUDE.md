@@ -17,7 +17,9 @@ pyproject.toml            # Root uv workspace + fishsense-meta package
 ```
 src/
   errors.rs                        # FishSenseError enum
-  world_point_handler.rs           # WorldPointHandler — projects image coords to 3D via K⁻¹
+  world_point_handler.rs           # WorldPointHandler — projects image coords to 3D via K⁻¹;
+                                   #   compute_world_point_from_laser_with_residual adds the
+                                   #   camera-ray/laser closest-approach distance
   laser/calibration.rs             # calibrate_laser() — 3D laser origin + orientation
   fish/fish_segmentation.rs        # FishSegmentation — ONNX instance segmentation (FishIAL)
   fish/fish_head_tail_detector.rs  # FishHeadTailDetector — PCA + geometry head/tail; predict_keypoint_depths method
@@ -78,6 +80,47 @@ uv run pylint fishsense_core/**/*.py   # lint
 ```
 
 `maturin develop` must be run before `import fishsense_core._native` will work.
+
+## Fixing a reported bug
+
+Write the regression test **first** and watch it fail against the unfixed code —
+a test written after the fix passes without ever having proved what it pins.
+Reproduce the reporter's numbers in the test where possible; e.g. the non-unit
+`laser_axis` fix pins `compute_world_point_from_laser` recovering a 1.5 m dot
+that the old code put at 1.35e-4 m.
+
+If `cargo test` can't run (see below), lift the new test onto the pre-fix file
+and run it in the scratch crate:
+
+```bash
+git show HEAD:rust/fishsense-core/src/world_point_handler.rs > /tmp/old.rs
+# ...append the new #[test] to /tmp/old.rs, point the scratch crate at it, run
+```
+
+## Running tests locally
+
+`cargo test` has been seen to SIGSEGV in the nix dev shell on the first
+`ndarray::dot` call — `ndarray-linalg` feature-unifies ndarray onto the nix
+`openblas-system` build, whose cblas ABI doesn't match. When it happens it fails
+identically on an unmodified checkout,
+so it is **not** a signal about the current edit; `OPENBLAS_NUM_THREADS` and
+`OPENBLAS_CORETYPE` don't help. CI (Ubuntu `libopenblas-dev`) is unaffected, and
+`cargo build` / `cargo clippy` work normally.
+
+To actually run unit tests for a module that needs no linear algebra
+(`world_point_handler.rs`, the geometry helpers), pull the file into a scratch
+crate whose only dependency is `ndarray` — no `ndarray-linalg`, so no BLAS:
+
+```rust
+// scratch/src/lib.rs
+#[path = "/abs/path/to/rust/fishsense-core/src/world_point_handler.rs"]
+pub mod world_point_handler;
+```
+
+Python tests need `maturin develop` first, so they can't run against a venv
+whose Python version has no matching `_native` build. Wrapper-level logic
+(dtype coercion, input validation) can still be exercised by stubbing
+`fishsense_core._native` with a numpy stand-in.
 
 ## CI workflows
 
