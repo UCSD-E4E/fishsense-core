@@ -793,33 +793,31 @@ mod tests {
         );
     }
 
-    /// Portrait image (height > width) → padded to (MAX, MIN, 3).
+    /// Every input pads onto the one canvas the ONNX graph accepts.
+    ///
+    /// These two cases previously asserted the **opposite** — `(MAX, MIN, 3)`
+    /// for portrait and for square — and that is precisely how the
+    /// orientation bug survived: they pinned what `pad_img` did rather than
+    /// what the model could consume. The exported input is a fixed
+    /// `[3, MIN_SIZE_TEST, MAX_SIZE_TEST]`, so a transposed canvas is never
+    /// valid; ORT rejected it and `inference`'s blanket error arm reported the
+    /// rejection as "no fish". A shape assertion that never asks whether the
+    /// shape is *usable* is not a test of anything.
     #[test]
-    fn test_pad_img_portrait_dims() {
-        let padded = seg().pad_img(&Array3::<u8>::zeros((200, 100, 3)));
-        assert_eq!(
-            padded.dim(),
-            (
-                FishSegmentation::MAX_SIZE_TEST,
-                FishSegmentation::MIN_SIZE_TEST,
-                3
-            )
+    fn test_pad_img_always_uses_model_input_dims() {
+        let expected = (
+            FishSegmentation::MIN_SIZE_TEST,
+            FishSegmentation::MAX_SIZE_TEST,
+            3,
         );
-    }
-
-    /// Square image (height == width) — not strictly landscape, so portrait
-    /// layout (MAX, MIN, 3).
-    #[test]
-    fn test_pad_img_square_uses_portrait_dims() {
-        let padded = seg().pad_img(&Array3::<u8>::zeros((100, 100, 3)));
-        assert_eq!(
-            padded.dim(),
-            (
-                FishSegmentation::MAX_SIZE_TEST,
-                FishSegmentation::MIN_SIZE_TEST,
-                3
-            )
-        );
+        for (h, w, label) in [
+            (100usize, 200usize, "landscape"),
+            (200, 100, "portrait"),
+            (100, 100, "square"),
+        ] {
+            let padded = seg().pad_img(&Array3::<u8>::zeros((h, w, 3)));
+            assert_eq!(padded.dim(), expected, "{label} input {h}x{w} padded wrong");
+        }
     }
 
     /// Original pixel values appear at the same (row, col, ch) position.
@@ -1050,6 +1048,105 @@ mod tests {
         assert!(
             iou >= 0.99,
             "inference() foreground IoU {iou:.4} vs golden below 0.99 — segmentation regressed"
+        );
+    }
+
+    /// Rotates an (H, W, C) image 90° clockwise, so the landscape fixture can
+    /// be fed to `inference` as portrait without needing a second fixture.
+    fn rotate90_cw(img: &Array3<u8>) -> Array3<u8> {
+        let (h, w, c) = img.dim();
+        let mut out = Array3::<u8>::zeros((w, h, c));
+        for y in 0..h {
+            for x in 0..w {
+                for k in 0..c {
+                    out[[x, h - 1 - y, k]] = img[[y, x, k]];
+                }
+            }
+        }
+        out
+    }
+
+    /// The ONNX graph's input is a **fixed** `[3, 800, 1058]`, and `pad_img`
+    /// built a transposed `(1058, 800)` canvas for any input where
+    /// `width <= height`. ORT then rejected the shape, and `inference`'s
+    /// blanket `Err(_) => Ok(zeros)` reported that as "no fish" — silently,
+    /// and ~40x faster than a real forward pass.
+    ///
+    /// Measured on a real dive frame before the fix: a 1025x1024 crop found
+    /// the fish in 6.33 s, while 1024x1024 and 1024x1025 crops of the same
+    /// fish returned an empty mask in 0.25 s and 0.10 s. One pixel decided it.
+    ///
+    /// Both callers that can hit this are real: any tiling scheme with square
+    /// tiles, and fishsense-mobile, whose `do_inference` maps an empty mask to
+    /// `FishNotFound` — so a portrait camera buffer would report "no fish" for
+    /// a frame that contains one.
+    #[test]
+    fn inference_finds_fish_in_non_landscape_input() {
+        let Some(img) = load_bgr_fixture("segmentation/rgb.jpg") else {
+            eprintln!("skipping inference_finds_fish_in_non_landscape_input: fixture absent");
+            return;
+        };
+        let (h, w, _) = img.dim();
+        assert!(w > h, "fixture is expected to be landscape; got {w}x{h}");
+
+        let mut s = FishSegmentation::new();
+        s.load_model().unwrap();
+
+        let landscape_px = s.inference(&img).unwrap().iter().filter(|&&v| v > 0).count();
+        assert!(
+            landscape_px > 0,
+            "landscape control found no fish — fixture or model is broken, \
+             not the orientation path"
+        );
+
+        let portrait = rotate90_cw(&img);
+        let (ph, pw, _) = portrait.dim();
+        assert!(pw < ph, "rotation should have produced portrait; got {pw}x{ph}");
+        let result = s.inference(&portrait).unwrap();
+
+        assert_eq!(
+            result.dim(),
+            (ph, pw),
+            "mask must come back in the caller's orientation"
+        );
+        let portrait_px = result.iter().filter(|&&v| v > 0).count();
+        assert!(
+            portrait_px > 0,
+            "inference() returned an empty mask for portrait input while the \
+             same image landscape gave {landscape_px} foreground px"
+        );
+        // Same fish, so the areas should agree closely; the tolerance absorbs
+        // resampling at a different pad offset, not a different detection.
+        let ratio = portrait_px as f32 / landscape_px as f32;
+        assert!(
+            (0.8..=1.25).contains(&ratio),
+            "portrait mask area {portrait_px} vs landscape {landscape_px} \
+             (ratio {ratio:.2}) — not the same detection"
+        );
+    }
+
+    /// Square input took the same broken branch, because the orientation test
+    /// was `height < width` (strict). Cheaper to pin than the full portrait
+    /// path, and it is the case a tiled inference scheme actually hits.
+    #[test]
+    fn inference_accepts_square_input() {
+        let Some(img) = load_bgr_fixture("segmentation/rgb.jpg") else {
+            eprintln!("skipping inference_accepts_square_input: fixture absent");
+            return;
+        };
+        let (h, w, _) = img.dim();
+        let side = h.min(w);
+        let x0 = (w - side) / 2; // centre crop, so the fish stays in frame
+        let square = img.slice(s![.., x0..x0 + side, ..]).to_owned();
+        assert_eq!(square.dim().0, square.dim().1, "crop should be square");
+
+        let mut s = FishSegmentation::new();
+        s.load_model().unwrap();
+        let result = s.inference(&square).unwrap();
+        assert_eq!(result.dim(), (side, side));
+        assert!(
+            result.iter().any(|&v| v > 0),
+            "inference() returned an empty mask for a square crop containing the fish"
         );
     }
 
