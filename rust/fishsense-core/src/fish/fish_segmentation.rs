@@ -249,17 +249,60 @@ impl FishSegmentation {
 
     // ── Image pre-processing ─────────────────────────────────────────────
 
+    /// Pads a resized image onto the single canvas the ONNX graph accepts.
+    ///
+    /// The exported input is a **fixed** `[3, MIN_SIZE_TEST, MAX_SIZE_TEST]`
+    /// — there is no portrait variant of the graph. This used to branch on
+    /// `height < width` and build a transposed `(MAX, MIN)` canvas for
+    /// anything not strictly landscape, which ORT then rejected; `inference`'s
+    /// blanket error arm turned that rejection into an all-zero mask, so a
+    /// square or portrait frame reported "no fish" instead of failing.
+    ///
+    /// Callers rotate non-landscape input before reaching here (see
+    /// [`Self::inference`]), and `resize_img` caps the long side at
+    /// `MAX_SIZE_TEST` while setting the short side to `MIN_SIZE_TEST`, so the
+    /// assign below always fits.
     pub(crate) fn pad_img(&self, img: &Array3<u8>) -> Array3<u8> {
         let (height, width, _) = img.dim();
+        debug_assert!(
+            height <= Self::MIN_SIZE_TEST && width <= Self::MAX_SIZE_TEST,
+            "resized image {height}x{width} does not fit the model's \
+             {}x{} input — was a non-landscape frame passed without rotating?",
+            Self::MIN_SIZE_TEST,
+            Self::MAX_SIZE_TEST
+        );
 
-        let mut pad_img = if height < width {
-            Array3::zeros((Self::MIN_SIZE_TEST, Self::MAX_SIZE_TEST, 3))
-        } else {
-            Array3::zeros((Self::MAX_SIZE_TEST, Self::MIN_SIZE_TEST, 3))
-        };
-
+        let mut pad_img = Array3::zeros((Self::MIN_SIZE_TEST, Self::MAX_SIZE_TEST, 3));
         pad_img.slice_mut(s![..height, ..width, ..]).assign(img);
         pad_img
+    }
+
+    /// Rotates an (H, W, C) image 90° clockwise.
+    fn rotate90_cw_img(img: &Array3<u8>) -> Array3<u8> {
+        let (h, w, c) = img.dim();
+        let mut out = Array3::<u8>::zeros((w, h, c));
+        for y in 0..h {
+            for x in 0..w {
+                for k in 0..c {
+                    out[[x, h - 1 - y, k]] = img[[y, x, k]];
+                }
+            }
+        }
+        out
+    }
+
+    /// Rotates an (H, W) mask 90° counter-clockwise — the exact inverse of
+    /// [`Self::rotate90_cw_img`], so a mask computed on a rotated frame comes
+    /// back in the caller's orientation.
+    fn rotate90_ccw_mask(mask: &Array2<u8>) -> Array2<u8> {
+        let (h, w) = mask.dim();
+        let mut out = Array2::<u8>::zeros((w, h));
+        for y in 0..h {
+            for x in 0..w {
+                out[[w - 1 - x, y]] = mask[[y, x]];
+            }
+        }
+        out
     }
 
     pub(crate) fn resize_img(&self, img: &Array3<u8>) -> Result<Array3<u8>, SegmentationError> {
@@ -696,6 +739,23 @@ impl FishSegmentation {
         &mut self,
         img: &Array3<u8>,
     ) -> Result<Option<Array2<u8>>, SegmentationError> {
+        // Same landscape-only constraint as `inference`; rotate in, rotate the
+        // mask back out. Without this, `pad_img`'s assign would now be
+        // out-of-bounds for portrait input rather than silently wrong.
+        let (h, w, _) = img.dim();
+        if h > w {
+            let rotated = Self::rotate90_cw_img(img);
+            return Ok(self
+                .inference_single_landscape(&rotated)?
+                .map(|m| Self::rotate90_ccw_mask(&m)));
+        }
+        self.inference_single_landscape(img)
+    }
+
+    fn inference_single_landscape(
+        &mut self,
+        img: &Array3<u8>,
+    ) -> Result<Option<Array2<u8>>, SegmentationError> {
         let (orig_h, orig_w, _) = img.dim();
 
         let resized = self.resize_img(img)?;
@@ -724,6 +784,28 @@ impl FishSegmentation {
 
     #[instrument(skip(self, img), fields(height = img.dim().0, width = img.dim().1))]
     pub fn inference(&mut self, img: &Array3<u8>) -> Result<Array2<u8>, SegmentationError> {
+        // The ONNX input is a fixed [3, MIN_SIZE_TEST, MAX_SIZE_TEST] —
+        // landscape only, with no portrait variant of the graph. Rotate a
+        // taller-than-wide frame in and rotate its mask back out, so callers
+        // get an answer in their own orientation instead of the silent
+        // all-zero mask this used to return (see `pad_img`).
+        //
+        // Square input needs no rotation: `resize_img` takes it to
+        // MIN_SIZE_TEST x MIN_SIZE_TEST, which fits the canvas with column
+        // padding. The old orientation test was `height < width`, so square
+        // took the broken branch too.
+        let (h, w, _) = img.dim();
+        if h > w {
+            let rotated = Self::rotate90_cw_img(img);
+            let mask = self.inference_landscape(&rotated)?;
+            return Ok(Self::rotate90_ccw_mask(&mask));
+        }
+        self.inference_landscape(img)
+    }
+
+    /// `inference` for input that is already wide-or-square. Split out so the
+    /// rotation wrapper above has exactly one body to call.
+    fn inference_landscape(&mut self, img: &Array3<u8>) -> Result<Array2<u8>, SegmentationError> {
         let (orig_h, orig_w, _) = img.dim();
 
         let resized = self.resize_img(img)?;
