@@ -12,10 +12,18 @@ changes two of the defaults. Everything else here is opt-in and off.
 
 The chain, in order, with the optional steps bracketed::
 
-    postprocess -> auto-gamma -> [stretch] -> [clahe] -> [red boost] -> uint8 BGR
+    postprocess -> [remove_water] -> auto-gamma -> [stretch] -> [clahe]
+                -> [red boost] -> [denoise] -> uint8 BGR
 
 and :class:`~fishsense_core.image.rectified_image.RectifiedImage` applies
 ``cv2.undistort`` after that, which is what puts pixels in label space.
+
+Two of those positions are forced rather than stylistic.
+:func:`~fishsense_core.water.seathru.remove_water` inverts a radiance formation
+model, so it goes on linear radiance — after ``postprocess``, before the
+auto-gamma; applying it later would invert a curve that is not in the model.
+Denoising goes last because the enhancer it is expressed as reads a finished
+uint8 frame.
 
 The new defaults
 ----------------
@@ -118,7 +126,7 @@ import logging
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence, Tuple
+from typing import Any, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -130,8 +138,10 @@ from skimage.util import img_as_float, img_as_ubyte
 
 from fishsense_core.image.image import open_image_source
 
-# cv2 and rawpy are extension modules whose members pylint cannot see.
-# pylint: disable=no-member
+# cv2 and rawpy are extension modules whose members pylint cannot see. The
+# length is docstrings: this module is where the decode's reasoning lives, and
+# splitting the chain across files to satisfy a line count would hide it.
+# pylint: disable=no-member,too-many-lines
 
 _log = logging.getLogger(__name__)
 
@@ -140,7 +150,9 @@ __all__ = [
     "WhiteBalance",
     "Gains",
     "apply_clahe",
+    "apply_denoise",
     "apply_red_boost",
+    "apply_seathru",
     "apply_stretch",
     "as_polygon",
     "auto_gamma",
@@ -458,6 +470,35 @@ class DecodeConfig:  # pylint: disable=too-many-instance-attributes
     #: ``[threshold, 1.0]`` leaves the ramp permanently near zero.
     red_boost_span: float = 0.05
 
+    #: Per-channel attenuation coefficients ``(R, G, B)`` per metre, for the
+    #: Sea-thru correction. ``None`` is off, and off is the default.
+    #:
+    #: Sea-thru cannot be a default even in principle: ``RawImage(raw_bytes)``
+    #: has no idea which dive a frame came from or how far away the subject
+    #: was, and the correction needs both. Fit these per dive with
+    #: :func:`fishsense_core.water.attenuation.fit_attenuation`; ``beta`` and
+    #: ``range_m`` are only meaningful together, and supplying one without the
+    #: other is refused.
+    beta: tuple[float, float, float] | None = None
+    #: Metric range to the subject, in metres — per image. See ``beta``.
+    #:
+    #: Applied uniformly across the frame, which is right for the subject the
+    #: range was measured at and increasingly wrong for background at another
+    #: distance. That is the ceiling on this correction, and lifting it needs a
+    #: per-pixel depth map.
+    range_m: float | None = None
+
+    #: Denoising, applied at the very end of the chain. ``None`` is off, and
+    #: off is the default — by a wide margin.
+    #:
+    #: A :class:`~fishsense_core.image.denoise.BM3DConfig`. It costs 15-36x the
+    #: entire decode (133.8 s per 12-megapixel frame at the ``np`` profile,
+    #: 56.8 s at ``lc``, against 3.7 s for the whole chain), so it cannot sit
+    #: inline until that is solved. Typed loosely here so
+    #: :mod:`fishsense_core.image.denoise` — and with it the optional ``bm3d``
+    #: dependency — is imported only when something asks for it.
+    denoise: Any | None = None
+
     #: Percentile for ``WHITE_PATCH`` and ``SLATE`` gain estimation.
     wb_percentile: float = 99.0
     #: Estimate white-balance gains from a half-resolution decode, then run the
@@ -510,6 +551,34 @@ class DecodeConfig:  # pylint: disable=too-many-instance-attributes
             raise ValueError(
                 f"red_boost_sigmas must be >= 0, got {self.red_boost_sigmas}"
             )
+        self._validate_seathru()
+
+    def _validate_seathru(self) -> None:
+        """``beta`` and ``range_m`` are meaningful only together.
+
+        Silently ignoring one of them would produce a frame that looks
+        corrected and is not, which is worse than refusing.
+        """
+        if (self.beta is None) != (self.range_m is None):
+            raise ValueError(
+                "beta and range_m must be given together: beta is the water's "
+                "attenuation per metre and range_m is how many metres, and "
+                f"neither means anything alone (got beta={self.beta!r}, "
+                f"range_m={self.range_m!r})"
+            )
+        if self.beta is not None:
+            if len(self.beta) != 3:
+                raise ValueError(
+                    f"beta must be three per-channel coefficients (R, G, B), "
+                    f"got {self.beta!r}"
+                )
+            if any(b < 0 for b in self.beta):
+                raise ValueError(
+                    f"beta must be non-negative — it is light lost per metre, so "
+                    f"a negative coefficient amplifies with distance: {self.beta!r}"
+                )
+        if self.range_m is not None and self.range_m < 0:
+            raise ValueError(f"range_m must be non-negative, got {self.range_m}")
 
     def _validate_stretch_percentiles(self) -> None:
         for name, value in (
@@ -588,6 +657,13 @@ class DecodeConfig:  # pylint: disable=too-many-instance-attributes
                 f"redboost{self.red_boost:g}"
                 + (f"@{self.red_boost_sigmas:g}s" if self.red_boost_sigmas else "")
             )
+        if self.beta is not None:
+            parts.append(
+                "seathru" + "_".join(f"{b:g}" for b in self.beta)
+                + f"@{self.range_m:g}m"
+            )
+        if self.denoise is not None:
+            parts.append(f"denoise{getattr(self.denoise, 'strength', ''):g}".rstrip())
         return "-".join(parts) if parts else "default"
 
 
@@ -838,6 +914,67 @@ def apply_red_boost(img: np.ndarray, config: DecodeConfig) -> np.ndarray:
     return out
 
 
+def apply_seathru(img: np.ndarray, config: DecodeConfig) -> np.ndarray:
+    """Invert the water column, given measured attenuation and a range.
+
+    ``img`` is **linear** float RGB in [0, 1], straight out of
+    ``rawpy.postprocess``. That placement is forced:
+    :func:`~fishsense_core.water.seathru.remove_water` inverts a radiance
+    formation model, and applying it after the auto-gamma would invert a curve
+    that is not in the model.
+
+    Off unless ``config.beta`` and ``config.range_m`` are both set, which they
+    cannot be by default — see :attr:`DecodeConfig.beta`.
+
+    Note ``normalize=False``. ``remove_water``'s own rescale-to-peak is for
+    looking at the result on its own; inside this chain it is actively harmful,
+    because the auto-gamma immediately downstream derives its exponent from the
+    frame's mean brightness. Renormalising first makes the frame brighter, the
+    auto-gamma then lifts less, and the starved red channel — which the
+    inversion had just doubled relative to green — is pulled up less than it
+    would have been. Measured on this repository's fixture at beta =
+    (0.263, 0.040, 0.001) and 3 m: the linear R/G ratio improves 0.130 -> 0.258
+    either way, but by the end of the chain ``normalize=True`` lands at 0.646
+    against the uncorrected frame's 0.700, i.e. worse than doing nothing, while
+    ``normalize=False`` lands at 0.706.
+
+    (0.706 against 0.700 is also the honest headline: on a close-range pool
+    frame the tone chain compresses away nearly all of the physics. The
+    correction scales with range and earns its place further out.)
+    """
+    if config.beta is None or config.range_m is None:
+        return img
+
+    # Imported here so `fishsense_core.water` stays off the import path of
+    # every decode that does not use it.
+    # pylint: disable-next=import-outside-toplevel
+    from fishsense_core.water.seathru import remove_water  # noqa: PLC0415
+
+    # Clipped because dividing by the transmission can push a bright pixel in a
+    # strongly attenuated channel above 1.0, and everything downstream of here
+    # assumes [0, 1].
+    return np.clip(
+        remove_water(img, config.beta, config.range_m, normalize=False), 0.0, 1.0
+    )
+
+
+def apply_denoise(bgr: np.ndarray, config: DecodeConfig) -> np.ndarray:
+    """Run the configured denoiser over a finished uint8 BGR frame.
+
+    Last in the chain, because the enhancer is defined over a finished frame.
+    Off by default and expensive enough that it cannot yet be anything else —
+    see :attr:`DecodeConfig.denoise`.
+    """
+    if config.denoise is None:
+        return bgr
+
+    # pylint: disable-next=import-outside-toplevel
+    from fishsense_core.image.denoise import bm3d_enhancer  # noqa: PLC0415
+
+    # The enhancer is written over RGB; the decode's own order is BGR.
+    return bm3d_enhancer(config.denoise)(bgr[:, :, ::-1])[:, :, ::-1]
+
+
 # ---------------------------------------------------------------------------
 # The two stages
 # ---------------------------------------------------------------------------
@@ -859,12 +996,13 @@ def decode_rectified_stage(
     camera_gains = resolve_white_balance(source, config, slate_quad=slate_quad)
 
     img = img_as_float(_decode_rgb16(source, config, camera_gains))
+    img = apply_seathru(img, config)
     img = auto_gamma(img, config.auto_gamma_target)
     img = apply_stretch(img, config)
     img = apply_clahe(img, config)
     img = apply_red_boost(img, config)
 
-    return img_as_ubyte(img[:, :, ::-1])
+    return apply_denoise(img_as_ubyte(img[:, :, ::-1]), config)
 
 
 def decode_linear_stage(

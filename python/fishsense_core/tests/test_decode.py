@@ -543,3 +543,124 @@ class TestRectify:
         matrix = [[10.0, 0.0, 8.0], [0.0, 10.0, 8.0], [0.0, 0.0, 1.0]]
 
         assert rectify(image, matrix, [0.0, 0.0, 0.0, 0.0, 0.0]).shape == (16, 16, 3)
+
+
+class TestOptionalExtras:
+    """`beta`/`range_m` (sea-thru) and `denoise`, both off by default.
+
+    They are here for the ordering, which is forced rather than stylistic, and
+    for the validation, which exists so a half-configured correction fails
+    loudly instead of producing a frame that looks corrected and is not.
+    """
+
+    def test_they_are_off_by_default(self):
+        config = DecodeConfig()
+
+        assert config.beta is None
+        assert config.range_m is None
+        assert config.denoise is None
+
+    def test_beta_and_range_are_meaningful_only_together(self):
+        """Sea-thru cannot be a default even in principle: `RawImage(bytes)`
+        has no idea which dive a frame came from or how far away the subject
+        was, and the correction needs both."""
+        DecodeConfig(beta=(0.263, 0.040, 0.001), range_m=1.5)
+
+        with pytest.raises(ValueError, match="must be given together"):
+            DecodeConfig(beta=(0.263, 0.040, 0.001))
+        with pytest.raises(ValueError, match="must be given together"):
+            DecodeConfig(range_m=1.5)
+
+    def test_a_malformed_beta_is_refused(self):
+        with pytest.raises(ValueError, match="three per-channel"):
+            DecodeConfig(beta=(0.263, 0.040), range_m=1.0)
+        with pytest.raises(ValueError, match="negative coefficient amplifies"):
+            DecodeConfig(beta=(-0.1, 0.04, 0.001), range_m=1.0)
+        with pytest.raises(ValueError, match="range_m must be non-negative"):
+            DecodeConfig(beta=(0.263, 0.040, 0.001), range_m=-1.0)
+
+    def test_sea_thru_runs_on_linear_radiance_before_the_auto_gamma(self):
+        """Forced, not stylistic: `remove_water` inverts a radiance formation
+        model, so applying it after a gamma curve inverts a curve that is not
+        in the model. Checked by running the two orders and showing they
+        disagree — if the placement did not matter, this test would be the one
+        to delete.
+        """
+        from fishsense_core.image.decode import apply_seathru  # noqa: PLC0415
+
+        scene = _scene()
+        config = DecodeConfig(beta=(0.263, 0.040, 0.001), range_m=3.0)
+
+        as_shipped = auto_gamma(apply_seathru(scene, config), 20)
+        reversed_order = apply_seathru(auto_gamma(scene, 20), config)
+
+        assert not np.allclose(as_shipped, reversed_order, atol=1e-3)
+
+    def test_sea_thru_lifts_red_relative_to_blue(self):
+        from fishsense_core.image.decode import apply_seathru  # noqa: PLC0415
+
+        scene = _scene()
+        corrected = apply_seathru(
+            scene, DecodeConfig(beta=(0.263, 0.040, 0.001), range_m=3.0)
+        )
+
+        before = scene[..., 0].mean() / scene[..., 2].mean()
+        after = corrected[..., 0].mean() / corrected[..., 2].mean()
+        assert after > before
+
+    def test_sea_thru_is_the_identity_when_off(self):
+        from fishsense_core.image.decode import apply_seathru  # noqa: PLC0415
+
+        scene = _scene()
+        assert apply_seathru(scene, DecodeConfig()) is scene
+
+    def test_denoise_is_the_identity_when_off(self):
+        from fishsense_core.image.decode import apply_denoise  # noqa: PLC0415
+
+        frame = (_scene() * 255).astype(np.uint8)
+        assert apply_denoise(frame, DecodeConfig()) is frame
+
+    def test_the_extras_are_named_in_the_label(self):
+        assert DecodeConfig(beta=(0.26, 0.04, 0.001), range_m=1.5).label == (
+            "seathru0.26_0.04_0.001@1.5m"
+        )
+
+    def test_configuring_denoise_does_not_import_bm3d(self):
+        """The `bm3d` extra is optional, so building a config that mentions it
+        must not require it to be installed — only running the decode does.
+
+        Checked in a fresh interpreter, because by the time this test runs in a
+        full suite something else has already imported it.
+        """
+        import subprocess  # noqa: PLC0415
+        import sys  # noqa: PLC0415
+
+        script = (
+            "import sys;"
+            "from fishsense_core.image.decode import DecodeConfig;"
+            "from fishsense_core.image.denoise import BM3DConfig;"
+            "DecodeConfig(denoise=BM3DConfig());"
+            "print('bm3d' in sys.modules)"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True, check=True
+        )
+        assert result.stdout.strip() == "False"
+
+    def test_an_unimportable_denoiser_says_which_extra_to_install(self):
+        """Rather than a bare ModuleNotFoundError from three frames down."""
+        import builtins  # noqa: PLC0415
+        from unittest.mock import patch  # noqa: PLC0415
+
+        from fishsense_core.image import denoise as denoise_module  # noqa: PLC0415
+
+        real_import = builtins.__import__
+
+        def refuse_bm3d(name, *args, **kwargs):
+            if name == "bm3d":
+                raise ImportError("no bm3d here")
+            return real_import(name, *args, **kwargs)
+
+        with patch.object(builtins, "__import__", refuse_bm3d):
+            with pytest.raises(ImportError, match=r"fishsense_core\[denoise\]"):
+                denoise_module._import_bm3d()  # pylint: disable=protected-access

@@ -45,6 +45,14 @@ python/fishsense_core/
     image/linear_raw_image.py      # Linear uint16 sensor-coord decode for the
                                    #   laser detector. Takes NO config on purpose
     image/rectified_image.py       # cv2.undistort via CameraIntrinsics
+    image/contract.py              # guard() + probe_geometry() — an enhancer may
+                                   #   not move a pixel (0.5 px hard limit)
+    image/texture.py               # scale-texture retention — the metric that
+                                   #   adjudicates denoisers
+    image/denoise.py               # BM3D on L, measured noise PSD. Optional
+                                   #   extra `[denoise]`; 15-36x the decode cost
+    water/attenuation.py           # fit beta per channel off the dive slate
+    water/seathru.py               # invert the formation model given beta + range
 ```
 
 The Python package exposes Rust functions through `fishsense_core._native`. New Rust functions must be registered in `python/fishsense_core/src/lib.rs` before they are callable from Python.
@@ -55,6 +63,29 @@ The Python package exposes Rust functions through `fishsense_core._native`. New 
 2. Add the module to `rust/fishsense-core/src/lib.rs`.
 3. If Python access is needed, add a PyO3 wrapper in `python/fishsense_core/src/` and register the submodule in `python/fishsense_core/src/lib.rs`.
 4. Add a Python convenience wrapper in `python/fishsense_core/fishsense_core/` that imports from `_native`.
+
+## The decode extras
+
+`image/contract.py`, `image/texture.py`, `image/denoise.py` and the `water/`
+package all ship **unused**. Nothing in the default decode calls them:
+`DecodeConfig.beta`/`range_m` (sea-thru) and `DecodeConfig.denoise` are `None`,
+and only setting them turns the corresponding step on.
+
+Two orderings inside `decode_rectified_stage` are forced rather than stylistic:
+
+* `apply_seathru` runs on **linear radiance**, after `rawpy.postprocess` and
+  before the auto-gamma. It inverts a radiance formation model, so applying it
+  later would invert a curve that is not in the model. It is also called with
+  `normalize=False` — `remove_water`'s rescale-to-peak makes the frame brighter,
+  which makes the auto-gamma lift less, which undoes the correction.
+* `apply_denoise` runs last, because the enhancer is defined over a finished
+  uint8 frame.
+
+Every enhancer must be geometrically inert: measurements here are pixel
+coordinates, and 1 px of laser-dot error is 0.75% length error.
+`probe_geometry` enforces that with a 0.5 px hard limit, calibrated by
+measurement (identity/Gaussian/CLAHE all read <= 0.074 px; a one-pixel roll
+reads 1.01; nothing legitimate lands in between).
 
 ## ONNX model (fish segmentation)
 

@@ -124,6 +124,11 @@ python/fishsense_core/
     image/decode.py           # DecodeConfig — the decode chain, parameterised
     image/raw_image.py        # Raw camera image decoding
     image/rectified_image.py  # Distortion correction
+    image/contract.py         # An enhancer may not move a pixel
+    image/texture.py          # Scale-texture retention metric
+    image/denoise.py          # BM3D (optional extra: fishsense_core[denoise])
+    water/attenuation.py      # Fit water attenuation off the dive slate
+    water/seathru.py          # Invert the formation model
 ```
 
 New algorithms should be implemented in `rust/fishsense-core/src/` and registered in `python/fishsense_core/src/lib.rs` if Python access is needed.

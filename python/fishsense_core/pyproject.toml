@@ -47,6 +47,13 @@ laser-detector = [
 # Requires-Dist has no locator and pip cannot resolve it. The laser detector
 # and its own output rectification (raw cv2.undistortPoints) do NOT need it.
 rectified = ["fishsense-api-sdk"]
+# BM3D denoising (fishsense_core.image.denoise). Kept out of the base install
+# because nothing enables it: it costs 15-36x the entire decode (133.8 s per
+# 12-megapixel frame at the "np" profile, 56.8 s at "lc", against 3.7 s for the
+# whole chain), so it cannot sit inline until that is solved. bm3d 4.0.x also
+# still calls `np.trapz`, which NumPy 2 removed; `_import_bm3d` restores the
+# alias before importing it.
+denoise = ["bm3d>=4.0"]
 # The slate board-mask (fishsense_core.slate.BoardMasker) runs a small CPU
 # PyTorch checkpoint from HuggingFace. The classical estimator
 # (estimate_plane) is base and needs none of this; the mask is optional and
@@ -74,4 +81,7 @@ dev = [
     # the test suite covers RectifiedImage, so the dev/CI env needs it. Resolved
     # from git via [tool.uv.sources].
     "fishsense-api-sdk",
+    # Likewise for the denoise extra: opt-in for users, but the tests cover it,
+    # and a dependency nobody's CI installs is a dependency nobody's CI checks.
+    "bm3d>=4.0",
 ]
