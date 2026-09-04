@@ -26,6 +26,10 @@ dependencies = [
     "opencv-python-headless>=4.11.0.86",
     "rawpy>=0.25.1",
     "scikit-image>=0.25.2",
+    # Already present transitively (scikit-image requires it), declared
+    # explicitly because fishsense_core imports it directly — the red-boost
+    # blob detector in image/decode.py uses scipy.ndimage.gaussian_filter.
+    "scipy>=1.13",
 ]
 
 [project.optional-dependencies]

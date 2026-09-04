@@ -38,7 +38,12 @@ python/fishsense_core/
   fishsense_core/
     laser.py                       # calibrate_laser() wraps _native.laser.calibrate_laser
     image/image.py                 # Abstract Image base class
-    image/raw_image.py             # Raw camera decoding (rawpy + CLAHE + auto-gamma)
+    image/decode.py                # DecodeConfig + the decode chain as functions;
+                                   #   default is auto-gamma -> global CIELAB L*
+                                   #   stretch (CLAHE is opt-in, was the default)
+    image/raw_image.py             # RawImage(source, config=DecodeConfig())
+    image/linear_raw_image.py      # Linear uint16 sensor-coord decode for the
+                                   #   laser detector. Takes NO config on purpose
     image/rectified_image.py       # cv2.undistort via CameraIntrinsics
 ```
 

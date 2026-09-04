@@ -67,7 +67,7 @@ class TestRawImageBytesAndPath:
         postprocess_output = _synthetic_postprocess_output()
         fake_imread = _make_imread(captured, postprocess_output)
 
-        with patch("fishsense_core.image.raw_image.rawpy.imread", side_effect=fake_imread):
+        with patch("fishsense_core.image.decode.rawpy.imread", side_effect=fake_imread):
             data_from_path = RawImage(raw_path).data
             data_from_bytes = RawImage(raw_bytes).data
 
@@ -92,7 +92,7 @@ class TestRawImageBytesAndPath:
             file_like.read()
             return _FakeRaw(postprocess_output)
 
-        with patch("fishsense_core.image.raw_image.rawpy.imread", side_effect=_imread):
+        with patch("fishsense_core.image.decode.rawpy.imread", side_effect=_imread):
             _ = RawImage(raw_path).data
 
         assert len(seen_types) == 1
@@ -109,7 +109,7 @@ class TestRawImageBytesAndPath:
             file_like.read()
             return _FakeRaw(postprocess_output)
 
-        with patch("fishsense_core.image.raw_image.rawpy.imread", side_effect=_imread):
+        with patch("fishsense_core.image.decode.rawpy.imread", side_effect=_imread):
             _ = RawImage(raw_bytes).data
 
         assert seen_types == [io.BytesIO]

@@ -18,6 +18,7 @@ import cv2
 import numpy as np
 import rawpy
 
+from fishsense_core.image.decode import DecodeConfig, decode_linear_stage
 from fishsense_core.image.image import Image, open_image_source
 
 _log = logging.getLogger(__name__)
@@ -89,20 +90,22 @@ class LinearRawImage(Image):
         super().__init__()
 
     def _get_data(self) -> np.ndarray:
-        """Decodes the raw image to linear 16-bit BGR in sensor coordinates."""
-        with open_image_source(self.__source) as f:
-            with rawpy.imread(f) as raw:
-                rgb = raw.postprocess(
-                    output_bps=16,
-                    gamma=(1, 1),          # linear — no gamma correction
-                    no_auto_bright=True,   # no histogram stretch
-                    use_camera_wb=True,
-                    output_color=rawpy.ColorSpace.sRGB,
-                    user_flip=0,           # no EXIF rotation (sensor coords)
-                )
+        """Decodes the raw image to linear 16-bit BGR in sensor coordinates.
 
-        _log.debug("linear raw image decoded: shape=%s", rgb.shape)
-        return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        Deliberately takes no ``config``. ``decode_linear_stage`` accepts one
+        so that "white balance reaches this stage, and nothing else does" is an
+        expressible and therefore testable claim — but this class is what
+        production calls, and giving it a knob is precisely how the laser path
+        would come to depend on decode work done for the labeler-facing JPEG.
+
+        The default config is camera white balance, so these are the same bytes
+        this class produced before ``decode.py`` existed;
+        ``tests/test_decode_golden.py`` holds the hash.
+        """
+        bgr = decode_linear_stage(self.__source, DecodeConfig())
+
+        _log.debug("linear raw image decoded: shape=%s", bgr.shape)
+        return bgr
 
     @property
     def bayer_excess(self) -> np.ndarray | None:
