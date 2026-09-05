@@ -132,21 +132,29 @@ class TestRectifiedImage:
         return intrinsics
 
     def test_undistort_is_called(self):
-        """RectifiedImage must delegate to cv2.undistort with the right args."""
+        """RectifiedImage must delegate to cv2.undistort with the right args.
+
+        Compared by value, not identity: RectifiedImage goes through
+        `fishsense_core.image.decode.rectify`, which coerces the intrinsics to
+        float64 arrays so it can be called without a `CameraIntrinsics` (the
+        SDK is an optional extra). That coercion allocates.
+        """
         from fishsense_core.image.rectified_image import RectifiedImage
 
         data = np.ones((4, 6, 3), dtype=np.uint8) * 128
         source = _StubImage(data)
         intrinsics = self._make_intrinsics()
 
-        with patch("fishsense_core.image.rectified_image.cv2.undistort", return_value=data) as mock_ud:
+        with patch("fishsense_core.image.decode.cv2.undistort", return_value=data) as mock_ud:
             rect = RectifiedImage(source, intrinsics)
             _ = rect.data  # trigger lazy load
 
-            mock_ud.assert_called_once_with(
-                data,
-                intrinsics.camera_matrix,
-                intrinsics.distortion_coefficients,
+            assert mock_ud.call_count == 1
+            passed_image, passed_matrix, passed_distortion = mock_ud.call_args.args
+            assert passed_image is data
+            np.testing.assert_array_equal(passed_matrix, intrinsics.camera_matrix)
+            np.testing.assert_array_equal(
+                passed_distortion, intrinsics.distortion_coefficients
             )
 
     def test_output_shape_preserved(self):
@@ -158,7 +166,7 @@ class TestRectifiedImage:
         intrinsics = self._make_intrinsics()
 
         with patch(
-            "fishsense_core.image.rectified_image.cv2.undistort",
+            "fishsense_core.image.decode.cv2.undistort",
             return_value=np.zeros((4, 6, 3), dtype=np.uint8),
         ):
             rect = RectifiedImage(source, intrinsics)

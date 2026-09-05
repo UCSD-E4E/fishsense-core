@@ -1,65 +1,50 @@
-"""FishSense Core Package"""
+"""The labeler-facing raw decode."""
 
 import logging
-import math
 from pathlib import Path
 
-import cv2
 import numpy as np
-import rawpy
-from skimage.exposure import adjust_gamma, equalize_adapthist # pylint: disable=no-name-in-module
-from skimage.util import img_as_float, img_as_ubyte
 
-from fishsense_core.image.image import Image, open_image_source
+from fishsense_core.image.decode import DecodeConfig, decode_rectified_stage
+from fishsense_core.image.image import Image
 
 _log = logging.getLogger(__name__)
 
 
 class RawImage(Image):
-    """Represents a raw image loaded from a file path or in-memory bytes."""
+    """A raw image decoded for viewing and for the fish models.
 
-    # pylint: disable=no-member
+    ``data`` is uint8 BGR. The chain is
+    :func:`~fishsense_core.image.decode.decode_rectified_stage`, and every step
+    of it is a field on ``config``.
 
-    def __init__(self, source: Path | bytes):
+    The default ``config`` applies a **global CIELAB L\\* percentile stretch
+    with CLAHE off**, which is a change from the local histogram equalisation
+    this class used to hard-code. ``DecodeConfig.production()`` reconstructs
+    the old chain exactly. See :mod:`fishsense_core.image.decode` for the
+    measurement behind the change and for what the evidence does not say.
+    """
+
+    def __init__(self, source: Path | bytes, *, config: DecodeConfig | None = None):
         self.__source = source
+        self.__config = config or DecodeConfig()
 
         super().__init__()
 
+    @property
+    def config(self) -> DecodeConfig:
+        """The decode this image was built with."""
+        return self.__config
+
     def _get_data(self) -> np.ndarray:
-        """Loads the raw image and processes it."""
         if isinstance(self.__source, (bytes, bytearray, memoryview)):
             _log.debug("loading raw image from %d bytes", len(self.__source))
         else:
             _log.debug("loading raw image: %s", self.__source)
 
-        with open_image_source(self.__source) as f:
-            with rawpy.imread(f) as raw:
-                img = img_as_float(
-                    raw.postprocess(
-                        gamma=(1, 1),
-                        no_auto_bright=True,
-                        use_camera_wb=True,
-                        output_bps=16,
-                        user_flip=0,
-                    )
-                )
+        img = decode_rectified_stage(self.__source, self.__config)
 
-                hsv = cv2.cvtColor(img_as_ubyte(img), cv2.COLOR_BGR2HSV)
-                _, _, val = cv2.split(hsv)
-
-                mid = 20
-                mean = np.mean(val)
-                mean_log = math.log(mean)
-                mid_log = math.log(mid * 255)
-                gamma = mid_log / mean_log
-                gamma = 1 / gamma
-
-                _log.debug("auto-gamma: mean_brightness=%.2f gamma=%.4f", mean, gamma)
-
-                img = adjust_gamma(img, gamma=gamma)
-                img = equalize_adapthist(img)
-
-                img = img_as_ubyte(img[:, :, ::-1])
-
-        _log.debug("raw image loaded: shape=%s", img.shape)
+        _log.debug(
+            "raw image loaded: shape=%s decode=%s", img.shape, self.__config.label
+        )
         return img

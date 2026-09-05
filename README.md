@@ -121,6 +121,7 @@ python/fishsense_core/
   fishsense_core/
     laser.py                  # calibrate_laser Python wrapper
     image/image.py            # Abstract Image base class
+    image/decode.py           # DecodeConfig — the decode chain, parameterised
     image/raw_image.py        # Raw camera image decoding
     image/rectified_image.py  # Distortion correction
 ```

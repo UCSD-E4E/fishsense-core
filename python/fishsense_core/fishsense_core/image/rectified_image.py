@@ -2,7 +2,6 @@
 
 import logging
 
-import cv2
 import numpy as np
 
 try:
@@ -15,6 +14,7 @@ except ImportError as exc:  # pragma: no cover - depends on install extras
         "laser detector and its own output rectification do not need this."
     ) from exc
 
+from fishsense_core.image.decode import rectify
 from fishsense_core.image.image import Image
 
 _log = logging.getLogger(__name__)
@@ -33,7 +33,7 @@ class RectifiedImage(Image):
 
     def _get_data(self) -> np.ndarray:
         _log.debug("rectifying image with camera intrinsics")
-        result = cv2.undistort(
+        result = rectify(
             self.__image.data,
             self.__intrinsics.camera_matrix,
             self.__intrinsics.distortion_coefficients,

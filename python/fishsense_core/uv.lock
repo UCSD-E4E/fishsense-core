@@ -300,6 +300,7 @@ dependencies = [
     { name = "opencv-python-headless" },
     { name = "rawpy" },
     { name = "scikit-image" },
+    { name = "scipy" },
 ]
 
 [package.optional-dependencies]
@@ -335,6 +336,7 @@ requires-dist = [
     { name = "opencv-python-headless", specifier = ">=4.11.0.86" },
     { name = "rawpy", specifier = ">=0.25.1" },
     { name = "scikit-image", specifier = ">=0.25.2" },
+    { name = "scipy", specifier = ">=1.13" },
     { name = "segmentation-models-pytorch", marker = "extra == 'laser-detector'", specifier = ">=0.4" },
     { name = "torch", marker = "extra == 'laser-detector'", specifier = ">=2.4" },
     { name = "torch", marker = "extra == 'slate'", specifier = ">=2.4" },
