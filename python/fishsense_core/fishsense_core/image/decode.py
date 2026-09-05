@@ -383,6 +383,11 @@ class DecodeConfig:  # pylint: disable=too-many-instance-attributes
     #: different states underwater: red is a narrow, noise-dominated band while
     #: blue is broad, so one pair of percentiles for all three is the wrong
     #: shape of knob.
+    #:
+    #: A triple is only meaningful with ``stretch_mode="per_channel"``. The
+    #: luminance stretch maps CIELAB L*, which is one channel, so there is
+    #: nothing for the other two entries to apply to — that combination is
+    #: refused rather than quietly using the first entry for everything.
     stretch_low: float | tuple[float, float, float] = 1.0
     #: Percentile mapped to white. Same single-or-triple rule.
     stretch_high: float | tuple[float, float, float] = 99.0
@@ -455,11 +460,25 @@ class DecodeConfig:  # pylint: disable=too-many-instance-attributes
 
     #: Percentile for ``WHITE_PATCH`` and ``SLATE`` gain estimation.
     wb_percentile: float = 99.0
-    #: Estimate white-balance gains from a half-resolution decode. Gains are a
-    #: global statistic, so the half-size pass costs about a quarter of the
-    #: time and moves them negligibly; the full decode then runs once with the
-    #: resulting ``user_wb``.
-    wb_estimate_half_size: bool = True
+    #: Estimate white-balance gains from a half-resolution decode, then run the
+    #: full decode once with the resulting ``user_wb``.
+    #:
+    #: **Off by default, because it is not free.** The reasoning for it — gains
+    #: are a global statistic, so a quarter-cost pass moves them negligibly —
+    #: does not survive measurement here. ``half_size`` skips the demosaic and
+    #: averages each 2x2 Bayer cell instead, which changes the noise floor of
+    #: exactly the channel that sits on it. On this repository's fixture the
+    #: red multiplier shifts by 14-15% for every estimator: gray-world
+    #: 22.62 -> 19.51, white-patch 6.58 -> 5.69, slate 6.84 -> 5.78.
+    #:
+    #: It is worse than that for ``WhiteBalance.SLATE``, which is not a global
+    #: statistic at all — it is a percentile inside one quad, and at half size
+    #: that quad has a quarter of the pixels to take a percentile of.
+    #:
+    #: Kept as a knob because the speed is real and a caller sweeping many
+    #: frames may want it; a 14% error in a gain nobody recommends using is not
+    #: the same kind of problem as a 14% error in the shipped decode.
+    wb_estimate_half_size: bool = False
 
     def __post_init__(self) -> None:
         if self.auto_gamma_target <= 0:
@@ -501,6 +520,15 @@ class DecodeConfig:  # pylint: disable=too-many-instance-attributes
                 raise ValueError(
                     f"{name} must be a number or an (R, G, B) triple, got {value!r}"
                 )
+        if self.stretch_mode != "per_channel" and (
+            isinstance(self.stretch_low, tuple) or isinstance(self.stretch_high, tuple)
+        ):
+            raise ValueError(
+                "an (R, G, B) percentile triple needs stretch_mode='per_channel'; "
+                f"stretch_mode={self.stretch_mode!r} maps a single channel "
+                "(CIELAB L*, or nothing at all), so two of the three entries "
+                "would have nowhere to apply"
+            )
         lows = self.stretch_low if isinstance(self.stretch_low, tuple) else (self.stretch_low,) * 3
         highs = (
             self.stretch_high if isinstance(self.stretch_high, tuple)
@@ -627,6 +655,10 @@ def resolve_white_balance(
     from a camera-WB decode of this same frame. Composing rather than replacing
     matters: it holds the colour matrix, demosaic and black levels fixed, so
     the difference between two configs is the white point and nothing else.
+
+    The probe decode is full-resolution unless
+    :attr:`DecodeConfig.wb_estimate_half_size` says otherwise — see that
+    field for what the cheaper pass costs.
     """
     if config.white_balance in (WhiteBalance.CAMERA, WhiteBalance.RAWPY_AUTO):
         return None
@@ -710,6 +742,9 @@ def apply_stretch(img: np.ndarray, config: DecodeConfig) -> np.ndarray:
         return img
 
     def _percentile_for(value, channel: int) -> float:
+        # A tuple only reaches here from the per_channel branch below —
+        # DecodeConfig refuses a triple in any other mode, precisely so that
+        # this cannot silently return the R entry for all three.
         return value[channel] if isinstance(value, tuple) else value
 
     def _map(plane: np.ndarray, channel: int = 0) -> np.ndarray:

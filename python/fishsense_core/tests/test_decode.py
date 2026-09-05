@@ -102,12 +102,57 @@ class TestDecodeConfigValidation:
     def test_percentile_triples_are_accepted_and_checked_elementwise(self):
         """Red is a narrow noise-dominated band while blue is broad, so one
         pair of percentiles for all three is the wrong shape of knob."""
-        DecodeConfig(stretch_low=(2.0, 1.0, 1.0), stretch_high=(99.0, 99.0, 99.5))
+        DecodeConfig(
+            stretch_mode="per_channel",
+            stretch_low=(2.0, 1.0, 1.0),
+            stretch_high=(99.0, 99.0, 99.5),
+        )
 
         with pytest.raises(ValueError, match="0 <= low < high <= 100"):
-            DecodeConfig(stretch_low=(2.0, 1.0, 99.9), stretch_high=99.0)
+            DecodeConfig(
+                stretch_mode="per_channel",
+                stretch_low=(2.0, 1.0, 99.9),
+                stretch_high=99.0,
+            )
         with pytest.raises(ValueError, match="an \\(R, G, B\\) triple"):
-            DecodeConfig(stretch_low=(1.0, 2.0))
+            DecodeConfig(stretch_mode="per_channel", stretch_low=(1.0, 2.0))
+
+    @pytest.mark.parametrize("mode", ["luminance", "off"])
+    def test_a_triple_without_per_channel_is_refused(self, mode):
+        """The luminance stretch maps CIELAB L*, which is one channel.
+
+        Accepting a triple there would silently use its R entry for the whole
+        frame while `label` went on advertising all three — a config that reads
+        as tuned per channel and is not.
+        """
+        with pytest.raises(ValueError, match="needs stretch_mode='per_channel'"):
+            DecodeConfig(stretch_mode=mode, stretch_low=(2.0, 1.0, 1.0))
+        with pytest.raises(ValueError, match="needs stretch_mode='per_channel'"):
+            DecodeConfig(stretch_mode=mode, stretch_high=(99.0, 95.0, 90.0))
+
+    def test_a_per_channel_triple_actually_reaches_each_channel(self):
+        """The other half of the same bug: that the triple is not merely
+        accepted but applied. Percentiles this far apart cannot produce the
+        same output as any single pair."""
+        scene = _scene()
+        triple = apply_stretch(
+            scene,
+            DecodeConfig(
+                stretch_mode="per_channel",
+                stretch_low=(2.0, 10.0, 20.0),
+                stretch_high=(99.0, 95.0, 90.0),
+            ),
+        )
+        for entry_low, entry_high in ((2.0, 99.0), (10.0, 95.0), (20.0, 90.0)):
+            scalar = apply_stretch(
+                scene,
+                DecodeConfig(
+                    stretch_mode="per_channel",
+                    stretch_low=entry_low,
+                    stretch_high=entry_high,
+                ),
+            )
+            assert not np.array_equal(triple, scalar)
 
     @pytest.mark.parametrize("field", ["red_boost", "red_boost_sigmas"])
     def test_negative_red_boost_is_refused(self, field):
@@ -130,7 +175,11 @@ class TestDecodeConfigValidation:
         for config in (
             DecodeConfig(),
             DecodeConfig.production(),
-            DecodeConfig(stretch_low=(2.0, 1.0, 1.0), auto_gamma_target=40),
+            DecodeConfig(
+                stretch_mode="per_channel",
+                stretch_low=(2.0, 1.0, 1.0),
+                auto_gamma_target=40,
+            ),
         ):
             assert config.label
             assert not set(config.label) & set("/\\ :*?\"<>|")

@@ -354,6 +354,109 @@ class TestTheDefaultChanged:
             assert calls[0] == {}
 
 
+class TestWhiteBalanceEstimation:
+    """The estimators, run end to end against the fixture.
+
+    None of these is recommended — every variant that gives red an independent
+    gain from the bottom of its range failed on field frames. They are tested
+    because they are reachable, and because the one claim made *about* them
+    turned out not to hold.
+    """
+
+    QUAD = [[200, 150], [440, 330]]
+
+    def _gains(self, white_balance, **kwargs):
+        from fishsense_core.image.decode import (  # noqa: PLC0415
+            resolve_white_balance,
+        )
+
+        config = DecodeConfig(white_balance=white_balance, **kwargs)
+        return resolve_white_balance(FIXTURE, config, slate_quad=self.QUAD)
+
+    def test_camera_and_auto_need_no_gains(self):
+        assert self._gains(WhiteBalance.CAMERA) is None
+        assert self._gains(WhiteBalance.RAWPY_AUTO) is None
+
+    @pytest.mark.parametrize(
+        "white_balance",
+        [WhiteBalance.GRAY_WORLD, WhiteBalance.WHITE_PATCH, WhiteBalance.SLATE],
+    )
+    def test_each_estimator_composes_onto_the_camera_multipliers(self, white_balance):
+        """Four multipliers in rawpy's [R, G1, B, G2] order, green pinned.
+
+        Composing onto the camera's own multipliers rather than replacing them
+        is what holds the colour matrix, demosaic and black levels fixed, so
+        the difference between two configs is the white point and nothing else.
+        """
+        gains = self._gains(white_balance)
+
+        assert gains is not None and len(gains) == 4
+        assert all(g > 0 for g in gains)
+        # G1 and G2 track each other; this sensor reports no separate G2.
+        assert gains[1] == pytest.approx(gains[3])
+        # Every estimator here pushes red up hard, which is the behaviour that
+        # made them fail on field frames.
+        assert gains[0] > 2.9375  # the camera's own red multiplier
+
+    def test_slate_without_a_quad_says_what_is_missing(self):
+        """The quad is per-image, so it cannot live on the config; the failure
+        has to name what the caller forgot to pass."""
+        from fishsense_core.image.decode import (  # noqa: PLC0415
+            resolve_white_balance,
+        )
+
+        config = DecodeConfig(white_balance=WhiteBalance.SLATE)
+        with pytest.raises(ValueError, match="slate_rectangle"):
+            resolve_white_balance(FIXTURE, config)
+
+    @pytest.mark.parametrize(
+        ("white_balance", "half", "full"),
+        [
+            (WhiteBalance.GRAY_WORLD, 19.51, 22.62),
+            (WhiteBalance.WHITE_PATCH, 5.69, 6.58),
+            (WhiteBalance.SLATE, 5.78, 6.83),
+        ],
+    )
+    def test_half_size_estimation_is_not_free(self, white_balance, half, full):
+        """`wb_estimate_half_size` was defaulted on, justified as moving the
+        gains "negligibly" because they are a global statistic.
+
+        They are not. ``half_size`` skips the demosaic and averages each 2x2
+        Bayer cell instead, which changes the noise floor of exactly the
+        channel — red — that sits on it. Measured here at 14-15% on the red
+        multiplier for all three estimators, which is why the default is now
+        off. Pinned so that turning it back on has to argue with a number.
+        """
+        assert self._gains(white_balance, wb_estimate_half_size=True)[0] == (
+            pytest.approx(half, rel=0.01)
+        )
+        assert self._gains(white_balance, wb_estimate_half_size=False)[0] == (
+            pytest.approx(full, rel=0.01)
+        )
+
+    def test_the_default_is_the_full_resolution_estimate(self):
+        assert DecodeConfig().wb_estimate_half_size is False
+        np.testing.assert_allclose(
+            self._gains(WhiteBalance.GRAY_WORLD),
+            self._gains(WhiteBalance.GRAY_WORLD, wb_estimate_half_size=False),
+        )
+
+    def test_an_estimated_white_balance_changes_the_pixels(self):
+        """Guards against the experiment silently being a no-op. A `user_wb`
+        that failed to take effect would report "white balance does not
+        matter", which is exactly the wrong conclusion to reach by accident.
+        """
+        from fishsense_core.image.decode import (  # noqa: PLC0415
+            decode_rectified_stage,
+        )
+
+        baseline = decode_rectified_stage(FIXTURE, DecodeConfig())
+        gray_world = decode_rectified_stage(
+            FIXTURE, DecodeConfig(white_balance=WhiteBalance.GRAY_WORLD)
+        )
+        assert not np.array_equal(baseline, gray_world)
+
+
 class TestLinearRawImageGolden:
     def test_decode_is_unchanged(self):
         image = LinearRawImage(FIXTURE)
