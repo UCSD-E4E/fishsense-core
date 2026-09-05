@@ -423,6 +423,67 @@ class TestClahe:
         )
 
 
+    def test_the_clip_limit_and_kernel_reach_skimage(self):
+        """Both are `None` by default, meaning skimage's own defaults. Neither
+        was ever passed through in a test, so nothing checked that setting one
+        did anything at all."""
+        from unittest.mock import patch  # noqa: PLC0415
+
+        scene = _scene()
+        with patch(
+            "fishsense_core.image.decode.equalize_adapthist",
+            side_effect=lambda img, **kw: (captured.update(kw) or img),
+        ):
+            captured: dict = {}
+            apply_clahe(scene, DecodeConfig(clahe_enabled=True))
+            assert captured == {}
+
+            captured = {}
+            apply_clahe(
+                scene,
+                DecodeConfig(
+                    clahe_enabled=True, clahe_clip_limit=0.003, clahe_kernel_size=16
+                ),
+            )
+            assert captured == {"clip_limit": 0.003, "kernel_size": 16}
+
+    def test_a_lower_clip_limit_amplifies_less(self):
+        """The knob's whole purpose, and the reason it is exposed.
+
+        Measured on flat water rather than on the gradient `_scene` builds: the
+        clip only binds where a tile's local histogram is narrow, which is
+        exactly the near-uniform region CLAHE over-amplifies and exactly what a
+        gradient does not have. On the gradient both limits give bit-identical
+        output, which is a fair description of the knob doing nothing there.
+        """
+        rng = np.random.default_rng(21)
+        water = np.clip(
+            0.30 + rng.normal(0.0, 0.004, (128, 128, 3)) * np.array([0.4, 1.0, 1.2]),
+            0.0,
+            1.0,
+        )
+
+        permissive = apply_clahe(
+            water, DecodeConfig(clahe_enabled=True, clahe_clip_limit=0.01)
+        )
+        strict = apply_clahe(
+            water, DecodeConfig(clahe_enabled=True, clahe_clip_limit=0.001)
+        )
+
+        assert strict.std() < permissive.std()
+        # And both amplify the input, which is the behaviour the default
+        # decode now avoids entirely.
+        assert permissive.std() > water.std()
+
+    def test_the_clahe_settings_are_named_in_the_label(self):
+        assert (
+            DecodeConfig(
+                clahe_enabled=True, clahe_clip_limit=0.003, clahe_kernel_size=16
+            ).label
+            == "clahe-clip0.003-kernel16"
+        )
+
+
 class TestRedBoost:
     def test_zero_is_the_identity(self):
         scene = _scene()
@@ -543,3 +604,182 @@ class TestRectify:
         matrix = [[10.0, 0.0, 8.0], [0.0, 10.0, 8.0], [0.0, 0.0, 1.0]]
 
         assert rectify(image, matrix, [0.0, 0.0, 0.0, 0.0, 0.0]).shape == (16, 16, 3)
+
+
+class TestOptionalExtras:
+    """`beta`/`range_m` (sea-thru) and `denoise`, both off by default.
+
+    They are here for the ordering, which is forced rather than stylistic, and
+    for the validation, which exists so a half-configured correction fails
+    loudly instead of producing a frame that looks corrected and is not.
+    """
+
+    def test_they_are_off_by_default(self):
+        config = DecodeConfig()
+
+        assert config.beta is None
+        assert config.range_m is None
+        assert config.denoise is None
+
+    def test_beta_and_range_are_meaningful_only_together(self):
+        """Sea-thru cannot be a default even in principle: `RawImage(bytes)`
+        has no idea which dive a frame came from or how far away the subject
+        was, and the correction needs both."""
+        DecodeConfig(beta=(0.263, 0.040, 0.001), range_m=1.5)
+
+        with pytest.raises(ValueError, match="must be given together"):
+            DecodeConfig(beta=(0.263, 0.040, 0.001))
+        with pytest.raises(ValueError, match="must be given together"):
+            DecodeConfig(range_m=1.5)
+
+    def test_a_malformed_beta_is_refused(self):
+        with pytest.raises(ValueError, match="three per-channel"):
+            DecodeConfig(beta=(0.263, 0.040), range_m=1.0)
+        with pytest.raises(ValueError, match="negative coefficient amplifies"):
+            DecodeConfig(beta=(-0.1, 0.04, 0.001), range_m=1.0)
+        with pytest.raises(ValueError, match="range_m must be non-negative"):
+            DecodeConfig(beta=(0.263, 0.040, 0.001), range_m=-1.0)
+
+    def test_sea_thru_runs_on_linear_radiance_before_the_auto_gamma(self):
+        """Forced, not stylistic: `remove_water` inverts a radiance formation
+        model, so applying it after a gamma curve inverts a curve that is not
+        in the model. Checked by running the two orders and showing they
+        disagree — if the placement did not matter, this test would be the one
+        to delete.
+        """
+        from fishsense_core.image.decode import apply_seathru  # noqa: PLC0415
+
+        scene = _scene()
+        config = DecodeConfig(beta=(0.263, 0.040, 0.001), range_m=3.0)
+
+        as_shipped = auto_gamma(apply_seathru(scene, config), 20)
+        reversed_order = apply_seathru(auto_gamma(scene, 20), config)
+
+        assert not np.allclose(as_shipped, reversed_order, atol=1e-3)
+
+    def test_sea_thru_lifts_red_relative_to_blue(self):
+        from fishsense_core.image.decode import apply_seathru  # noqa: PLC0415
+
+        scene = _scene()
+        corrected = apply_seathru(
+            scene, DecodeConfig(beta=(0.263, 0.040, 0.001), range_m=3.0)
+        )
+
+        before = scene[..., 0].mean() / scene[..., 2].mean()
+        after = corrected[..., 0].mean() / corrected[..., 2].mean()
+        assert after > before
+
+    def test_sea_thru_is_the_identity_when_off(self):
+        from fishsense_core.image.decode import apply_seathru  # noqa: PLC0415
+
+        scene = _scene()
+        assert apply_seathru(scene, DecodeConfig()) is scene
+
+    def test_denoise_is_the_identity_when_off(self):
+        from fishsense_core.image.decode import apply_denoise  # noqa: PLC0415
+
+        frame = (_scene() * 255).astype(np.uint8)
+        assert apply_denoise(frame, DecodeConfig()) is frame
+
+    def test_the_extras_are_named_in_the_label(self):
+        from fishsense_core.image.denoise import BM3DConfig  # noqa: PLC0415
+
+        assert DecodeConfig(beta=(0.26, 0.04, 0.001), range_m=1.5).label == (
+            "seathru0.26_0.04_0.001@1.5m"
+        )
+        assert DecodeConfig(denoise=BM3DConfig(strength=0.5)).label == "denoise0.5"
+
+    def test_a_denoiser_without_a_strength_still_labels(self):
+        """`label` is used as a filename stem and in reports, so it must not be
+        the thing that raises. The earlier
+        ``f"...{getattr(o, 'strength', ''):g}"`` did: ":g" cannot format the
+        empty-string fallback."""
+
+        class Bare:  # a denoiser that is not a BM3DConfig
+            pass
+
+        assert DecodeConfig(denoise=Bare()).label == "denoise"
+
+    def test_the_denoiser_actually_runs_through_the_decode(self):
+        """`apply_denoise` flips BGR to RGB for the enhancer and back again;
+        nothing tested that wiring end to end, only the enhancer alone."""
+        pytest.importorskip("bm3d", reason="the `denoise` extra is not installed")
+
+        from fishsense_core.image.decode import apply_denoise  # noqa: PLC0415
+        from fishsense_core.image.denoise import BM3DConfig  # noqa: PLC0415
+
+        rng = np.random.default_rng(9)
+        # A frame whose channels are clearly distinguishable, so a swapped
+        # flip would show up as a colour change rather than as nothing.
+        frame = np.clip(
+            np.stack(
+                [
+                    rng.normal(200, 6, (64, 64)),
+                    rng.normal(120, 6, (64, 64)),
+                    rng.normal(40, 6, (64, 64)),
+                ],
+                axis=2,
+            ),
+            0,
+            255,
+        ).astype(np.uint8)
+
+        out = apply_denoise(frame, DecodeConfig(denoise=BM3DConfig(psd_size=16)))
+
+        import cv2  # noqa: PLC0415
+
+        assert out.shape == frame.shape and out.dtype == np.uint8
+        # Luminance, not a single channel: the enhancer filters CIELAB L and
+        # passes a and b through, so independent per-channel noise survives on
+        # purpose and a per-channel SD would not move.
+        assert cv2.cvtColor(out, cv2.COLOR_BGR2GRAY).std() < cv2.cvtColor(
+            frame, cv2.COLOR_BGR2GRAY
+        ).std()
+        # Channel order preserved through the two flips: B stays the bright
+        # one, R stays the dark one. A swapped flip inverts this.
+        assert out[..., 0].mean() > out[..., 1].mean() > out[..., 2].mean()
+        np.testing.assert_allclose(
+            out.reshape(-1, 3).mean(axis=0),
+            frame.reshape(-1, 3).mean(axis=0),
+            atol=3.0,
+        )
+
+    def test_configuring_denoise_does_not_import_bm3d(self):
+        """The `bm3d` extra is optional, so building a config that mentions it
+        must not require it to be installed — only running the decode does.
+
+        Checked in a fresh interpreter, because by the time this test runs in a
+        full suite something else has already imported it.
+        """
+        import subprocess  # noqa: PLC0415
+        import sys  # noqa: PLC0415
+
+        script = (
+            "import sys;"
+            "from fishsense_core.image.decode import DecodeConfig;"
+            "from fishsense_core.image.denoise import BM3DConfig;"
+            "DecodeConfig(denoise=BM3DConfig());"
+            "print('bm3d' in sys.modules)"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True, check=True
+        )
+        assert result.stdout.strip() == "False"
+
+    def test_an_unimportable_denoiser_says_which_extra_to_install(self):
+        """Rather than a bare ModuleNotFoundError from three frames down."""
+        import builtins  # noqa: PLC0415
+        from unittest.mock import patch  # noqa: PLC0415
+
+        from fishsense_core.image import denoise as denoise_module  # noqa: PLC0415
+
+        real_import = builtins.__import__
+
+        def refuse_bm3d(name, *args, **kwargs):
+            if name == "bm3d":
+                raise ImportError("no bm3d here")
+            return real_import(name, *args, **kwargs)
+
+        with patch.object(builtins, "__import__", refuse_bm3d):
+            with pytest.raises(ImportError, match=r"fishsense_core\[denoise\]"):
+                denoise_module._import_bm3d()  # pylint: disable=protected-access

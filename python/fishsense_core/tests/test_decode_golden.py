@@ -501,6 +501,8 @@ class TestLinearRawImageGolden:
         This is the property that lets a decode change ship without re-running
         laser calibration, so it is asserted rather than reasoned about.
         """
+        from fishsense_core.image.denoise import BM3DConfig  # noqa: PLC0415
+
         baseline = decode_linear_stage(FIXTURE, DecodeConfig())
         moved = decode_linear_stage(
             FIXTURE,
@@ -512,6 +514,9 @@ class TestLinearRawImageGolden:
                 clahe_enabled=True,
                 clahe_clip_limit=0.003,
                 red_boost=0.4,
+                beta=(0.263, 0.040, 0.001),
+                range_m=3.0,
+                denoise=BM3DConfig(),
             ),
         )
         np.testing.assert_array_equal(baseline, moved)
