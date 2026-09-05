@@ -1,5 +1,17 @@
 # Changelog
 
+## [4.0.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v3.0.0...fishsense_core-v4.0.0) (2026-09-05)
+
+
+### ⚠ BREAKING CHANGES
+
+* **image:** the default decode is now a global CIELAB L* percentile stretch with CLAHE off, where it was `equalize_adapthist` at skimage's defaults. `DecodeConfig.production()` reconstructs the old chain, and `test_decode_golden.py` asserts it is bit-identical to the hash pinned before this change — so the parameterisation is provably faithful and only the default moved. Callers wanting the old bytes pass that config; everyone else gets the recommended chain and a faster decode.
+
+### Features
+
+* **image:** add the underwater enhancement vocabulary, all of it off by default ([#80](https://github.com/UCSD-E4E/fishsense-core/issues/80)) ([78d6814](https://github.com/UCSD-E4E/fishsense-core/commit/78d6814ced9e62981493b02f422c87d21c997575))
+* **image:** parameterise the raw decode and change its default ([#79](https://github.com/UCSD-E4E/fishsense-core/issues/79)) ([aafa7ec](https://github.com/UCSD-E4E/fishsense-core/commit/aafa7ecb8c1eedba72c14ba10a2e228d73f45228))
+
 ## [3.0.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v2.4.1...fishsense_core-v3.0.0) (2026-08-20)
 
 
