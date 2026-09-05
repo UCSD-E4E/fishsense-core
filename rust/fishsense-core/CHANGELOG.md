@@ -1,5 +1,16 @@
 # Changelog
 
+## [4.0.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v3.0.0...fishsense-core-v4.0.0) (2026-09-05)
+
+
+### ⚠ BREAKING CHANGES
+
+* **fish_segmentation:** answer non-landscape input instead of reporting "no fish" ([#76](https://github.com/UCSD-E4E/fishsense-core/issues/76))
+
+### Bug Fixes
+
+* **fish_segmentation:** answer non-landscape input instead of reporting "no fish" ([#76](https://github.com/UCSD-E4E/fishsense-core/issues/76)) ([36c911a](https://github.com/UCSD-E4E/fishsense-core/commit/36c911a7b19d43a5aede296c3d852c2f08c0df72))
+
 ## [3.0.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v2.4.1...fishsense-core-v3.0.0) (2026-08-20)
 
 
