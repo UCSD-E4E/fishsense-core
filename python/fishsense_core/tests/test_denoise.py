@@ -11,6 +11,7 @@ import pytest
 
 from fishsense_core.image.contract import probe_geometry
 from fishsense_core.image.denoise import (
+    BM3D_PROFILES,
     BM3DConfig,
     TexturedNoiseRegion,
     bm3d_enhancer,
@@ -56,11 +57,45 @@ class TestConfig:
             ({"psd_size": 4}, "psd_size"),
             ({"strength": 0.0}, "strength"),
             ({"chroma_strength": -1.0}, "chroma_strength"),
+            ({"profile": "fast"}, "profile must be one of"),
         ],
     )
     def test_nonsense_is_refused_at_construction(self, kwargs, match):
         with pytest.raises(ValueError, match=match):
             BM3DConfig(**kwargs)
+
+    @pytest.mark.parametrize("profile", BM3D_PROFILES)
+    def test_every_advertised_profile_name_is_one_bm3d_accepts(self, profile):
+        """`bm3d.bm3d` takes np/refilter/vn/high/vn_old/deb or a BM3DProfile
+        object. "lc" is not among the strings — the low-complexity profile
+        exists only as `bm3d.BM3DProfileLC` — so `profile="lc"`, which the cost
+        figures quote, used to run the whole decode and then raise TypeError
+        from inside the filter. Every name this module advertises has to work.
+        """
+        import bm3d  # noqa: PLC0415
+
+        from fishsense_core.image.denoise import _resolve_profile  # noqa: PLC0415
+
+        resolved = _resolve_profile(bm3d, profile)
+        assert isinstance(resolved, (str, bm3d.BM3DProfile))
+        if isinstance(resolved, str):
+            assert resolved != "lc"
+
+    def test_the_low_complexity_profile_actually_runs(self):
+        """The one the docstrings offer as the cheaper option: 56.8 s/frame
+        against the reference profile's 133.8 s."""
+        water = _noisy_water(size=48)
+        out = denoise_luminance(water, water, BM3DConfig(psd_size=16, profile="lc"))
+
+        assert out.shape == water.shape
+        assert out.std() < water.std()
+
+    def test_a_profile_object_passes_straight_through(self):
+        import bm3d  # noqa: PLC0415
+
+        water = _noisy_water(size=48)
+        config = BM3DConfig(psd_size=16, profile=bm3d.BM3DProfileLC())
+        assert denoise_luminance(water, water, config).std() < water.std()
 
 
 class TestNoisePsd:
@@ -157,6 +192,24 @@ class TestEnhancer:
         # Not bit-identical — L moved, and the round trip through sRGB is
         # nonlinear — but the hue must not have been filtered.
         assert float(np.median(np.abs(after - before))) < 1.5
+
+    def test_chroma_filtering_takes_the_speckle_and_leaves_the_hue(self):
+        """Scales are luminance texture, so chroma can be filtered far harder
+        than L without touching them. What must survive is the *local mean* of
+        a and b, which is the hue the species and slate labels read."""
+        from skimage.color import rgb2lab  # noqa: PLC0415
+
+        frame = _frame()
+        config = BM3DConfig(psd_size=32, chroma_strength=2.0)
+        out = bm3d_enhancer(config)(frame)
+
+        before = rgb2lab(frame.astype(np.float64) / 255.0)[..., 1:]
+        after = rgb2lab(out.astype(np.float64) / 255.0)[..., 1:]
+
+        # Speckle down...
+        assert after.std() < before.std()
+        # ...hue held: the frame-wide mean of a and b barely moves.
+        np.testing.assert_allclose(after.mean(axis=(0, 1)), before.mean(axis=(0, 1)), atol=2.0)
 
     def test_a_textured_psd_region_warns_rather_than_over_filtering_in_silence(self):
         """When a test frame's scale lattice extended into the PSD region, the

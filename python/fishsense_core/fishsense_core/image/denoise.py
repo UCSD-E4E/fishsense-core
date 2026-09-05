@@ -82,12 +82,26 @@ from skimage.color import lab2rgb, rgb2lab  # pylint: disable=no-name-in-module
 from fishsense_core.image.texture import SIGNIFICANCE, texture_power
 
 __all__ = [
+    "BM3D_PROFILES",
     "BM3DConfig",
     "TexturedNoiseRegion",
     "bm3d_enhancer",
     "denoise_luminance",
     "noise_psd_from_water",
 ]
+
+#: Profile names :class:`BM3DConfig` accepts.
+#:
+#: ``bm3d.bm3d`` takes either one of its own strings —
+#: ``np``/``refilter``/``vn``/``high``/``vn_old``/``deb`` — or a
+#: ``BM3DProfile`` object. ``"lc"`` is **not** among the strings: the
+#: low-complexity profile exists only as ``bm3d.BM3DProfileLC``, so passing
+#: the obvious ``profile="lc"`` runs the entire decode and then raises
+#: ``TypeError`` from inside the filter, minutes in. It is accepted here and
+#: resolved to that object, because it is the profile the cost measurements
+#: quote (56.8 s/frame against the reference profile's 133.8 s) and a name
+#: that is documented has to work.
+BM3D_PROFILES = ("np", "lc", "refilter", "vn", "high", "vn_old", "deb")
 
 
 class TexturedNoiseRegion(UserWarning):
@@ -132,8 +146,9 @@ class BM3DConfig:
     #: Scales the PSD handed to BM3D. 1.0 is as measured; 0.5 is the setting
     #: that kept 84% of the scale peak.
     strength: float = 1.0
-    #: BM3D profile. ``"np"`` is the reference quality at 133.8 s/frame;
-    #: ``"lc"`` is 56.8 s. Neither is fast enough to sit inline.
+    #: BM3D profile: one of :data:`BM3D_PROFILES`, or a ``bm3d.BM3DProfile``
+    #: object. ``"np"`` is the reference quality at 133.8 s/frame; ``"lc"`` is
+    #: 56.8 s. Neither is fast enough to sit inline.
     profile: str = "np"
     #: PSD multiplier for the a and b channels; 0 leaves them untouched.
     #:
@@ -145,6 +160,14 @@ class BM3DConfig:
     chroma_strength: float = 0.0
 
     def __post_init__(self) -> None:
+        # Validated as a *name*, without importing bm3d: the package is an
+        # optional extra, and building a config must not require it. The
+        # alternative is discovering the typo after a full-frame decode.
+        if isinstance(self.profile, str) and self.profile not in BM3D_PROFILES:
+            raise ValueError(
+                f"profile must be one of {BM3D_PROFILES} or a bm3d.BM3DProfile "
+                f"object, got {self.profile!r}"
+            )
         if self.psd_size < 8:
             raise ValueError(f"psd_size must be at least 8, got {self.psd_size}")
         if self.strength <= 0:
@@ -195,6 +218,17 @@ def _psd_for_image(psd: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
     return np.fft.ifftshift(resampled) * float(height * width)
 
 
+def _resolve_profile(bm3d, profile):
+    """Turn a :data:`BM3D_PROFILES` name into what ``bm3d.bm3d`` accepts.
+
+    Only ``"lc"`` needs translating; every other name is one of the package's
+    own strings, and a ``BM3DProfile`` object passes straight through.
+    """
+    if profile == "lc":
+        return bm3d.BM3DProfileLC()
+    return profile
+
+
 def denoise_luminance(
     lum: np.ndarray, water: np.ndarray, config: BM3DConfig | None = None
 ) -> np.ndarray:
@@ -207,7 +241,9 @@ def denoise_luminance(
         np.asarray(water, dtype=np.float64) / 255.0, config.psd_size
     )
     psd_image = _psd_for_image(psd * config.strength, arr.shape)
-    out = bm3d.bm3d(arr, sigma_psd=psd_image, profile=config.profile)
+    out = bm3d.bm3d(
+        arr, sigma_psd=psd_image, profile=_resolve_profile(bm3d, config.profile)
+    )
     return np.clip(np.asarray(out, dtype=np.float64) * 255.0, 0.0, 255.0)
 
 

@@ -423,6 +423,67 @@ class TestClahe:
         )
 
 
+    def test_the_clip_limit_and_kernel_reach_skimage(self):
+        """Both are `None` by default, meaning skimage's own defaults. Neither
+        was ever passed through in a test, so nothing checked that setting one
+        did anything at all."""
+        from unittest.mock import patch  # noqa: PLC0415
+
+        scene = _scene()
+        with patch(
+            "fishsense_core.image.decode.equalize_adapthist",
+            side_effect=lambda img, **kw: (captured.update(kw) or img),
+        ):
+            captured: dict = {}
+            apply_clahe(scene, DecodeConfig(clahe_enabled=True))
+            assert captured == {}
+
+            captured = {}
+            apply_clahe(
+                scene,
+                DecodeConfig(
+                    clahe_enabled=True, clahe_clip_limit=0.003, clahe_kernel_size=16
+                ),
+            )
+            assert captured == {"clip_limit": 0.003, "kernel_size": 16}
+
+    def test_a_lower_clip_limit_amplifies_less(self):
+        """The knob's whole purpose, and the reason it is exposed.
+
+        Measured on flat water rather than on the gradient `_scene` builds: the
+        clip only binds where a tile's local histogram is narrow, which is
+        exactly the near-uniform region CLAHE over-amplifies and exactly what a
+        gradient does not have. On the gradient both limits give bit-identical
+        output, which is a fair description of the knob doing nothing there.
+        """
+        rng = np.random.default_rng(21)
+        water = np.clip(
+            0.30 + rng.normal(0.0, 0.004, (128, 128, 3)) * np.array([0.4, 1.0, 1.2]),
+            0.0,
+            1.0,
+        )
+
+        permissive = apply_clahe(
+            water, DecodeConfig(clahe_enabled=True, clahe_clip_limit=0.01)
+        )
+        strict = apply_clahe(
+            water, DecodeConfig(clahe_enabled=True, clahe_clip_limit=0.001)
+        )
+
+        assert strict.std() < permissive.std()
+        # And both amplify the input, which is the behaviour the default
+        # decode now avoids entirely.
+        assert permissive.std() > water.std()
+
+    def test_the_clahe_settings_are_named_in_the_label(self):
+        assert (
+            DecodeConfig(
+                clahe_enabled=True, clahe_clip_limit=0.003, clahe_kernel_size=16
+            ).label
+            == "clahe-clip0.003-kernel16"
+        )
+
+
 class TestRedBoost:
     def test_zero_is_the_identity(self):
         scene = _scene()
@@ -621,8 +682,66 @@ class TestOptionalExtras:
         assert apply_denoise(frame, DecodeConfig()) is frame
 
     def test_the_extras_are_named_in_the_label(self):
+        from fishsense_core.image.denoise import BM3DConfig  # noqa: PLC0415
+
         assert DecodeConfig(beta=(0.26, 0.04, 0.001), range_m=1.5).label == (
             "seathru0.26_0.04_0.001@1.5m"
+        )
+        assert DecodeConfig(denoise=BM3DConfig(strength=0.5)).label == "denoise0.5"
+
+    def test_a_denoiser_without_a_strength_still_labels(self):
+        """`label` is used as a filename stem and in reports, so it must not be
+        the thing that raises. The earlier
+        ``f"...{getattr(o, 'strength', ''):g}"`` did: ":g" cannot format the
+        empty-string fallback."""
+
+        class Bare:  # a denoiser that is not a BM3DConfig
+            pass
+
+        assert DecodeConfig(denoise=Bare()).label == "denoise"
+
+    def test_the_denoiser_actually_runs_through_the_decode(self):
+        """`apply_denoise` flips BGR to RGB for the enhancer and back again;
+        nothing tested that wiring end to end, only the enhancer alone."""
+        pytest.importorskip("bm3d", reason="the `denoise` extra is not installed")
+
+        from fishsense_core.image.decode import apply_denoise  # noqa: PLC0415
+        from fishsense_core.image.denoise import BM3DConfig  # noqa: PLC0415
+
+        rng = np.random.default_rng(9)
+        # A frame whose channels are clearly distinguishable, so a swapped
+        # flip would show up as a colour change rather than as nothing.
+        frame = np.clip(
+            np.stack(
+                [
+                    rng.normal(200, 6, (64, 64)),
+                    rng.normal(120, 6, (64, 64)),
+                    rng.normal(40, 6, (64, 64)),
+                ],
+                axis=2,
+            ),
+            0,
+            255,
+        ).astype(np.uint8)
+
+        out = apply_denoise(frame, DecodeConfig(denoise=BM3DConfig(psd_size=16)))
+
+        import cv2  # noqa: PLC0415
+
+        assert out.shape == frame.shape and out.dtype == np.uint8
+        # Luminance, not a single channel: the enhancer filters CIELAB L and
+        # passes a and b through, so independent per-channel noise survives on
+        # purpose and a per-channel SD would not move.
+        assert cv2.cvtColor(out, cv2.COLOR_BGR2GRAY).std() < cv2.cvtColor(
+            frame, cv2.COLOR_BGR2GRAY
+        ).std()
+        # Channel order preserved through the two flips: B stays the bright
+        # one, R stays the dark one. A swapped flip inverts this.
+        assert out[..., 0].mean() > out[..., 1].mean() > out[..., 2].mean()
+        np.testing.assert_allclose(
+            out.reshape(-1, 3).mean(axis=0),
+            frame.reshape(-1, 3).mean(axis=0),
+            atol=3.0,
         )
 
     def test_configuring_denoise_does_not_import_bm3d(self):

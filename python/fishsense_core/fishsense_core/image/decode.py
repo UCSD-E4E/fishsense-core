@@ -663,7 +663,16 @@ class DecodeConfig:  # pylint: disable=too-many-instance-attributes
                 + f"@{self.range_m:g}m"
             )
         if self.denoise is not None:
-            parts.append(f"denoise{getattr(self.denoise, 'strength', ''):g}".rstrip())
+            # `strength` is the one field that distinguishes two otherwise
+            # identical denoise configs, and the one the measurements are
+            # quoted at. A denoiser without one still gets a label, because a
+            # label that raises is worse than a label that is vague — the
+            # earlier `f"...{getattr(o, 'strength', ''):g}"` did raise, since
+            # ":g" cannot format the empty-string fallback.
+            strength = getattr(self.denoise, "strength", None)
+            parts.append(
+                "denoise" if strength is None else f"denoise{strength:g}"
+            )
         return "-".join(parts) if parts else "default"
 
 
