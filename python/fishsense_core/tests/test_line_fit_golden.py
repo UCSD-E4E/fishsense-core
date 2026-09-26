@@ -10,6 +10,14 @@ Every expected value below was produced by fishsense-lite@a8b2c3bc's
 ``laser_label_validation/line_fit.py`` under that repo's locked numpy
 (2.5.1), fed the inputs built by ``_build_cases`` — not by this package.
 
+One field deliberately differs: ``label_noise_mad``. fishsense-lite took the
+MAD over absolute distances, which estimates ~0.59 sigma, so its "3 sigma"
+outlier cut flagged ~7.6% of clean labels. This package takes it over signed
+residuals. The expected values here are fishsense-lite's own fit with that one
+formula swapped (``1.4826 * MAD(a*x + b*y + c)``), and fishsense-lite's
+original value sits beside each, so a migrated row can still be matched. The
+flagged sets did not change on any case here.
+
 Two deliberate tolerances, both measured by running that same source under
 numpy 2.5.1 and 2.4.4:
 
@@ -102,7 +110,7 @@ GOLDEN = {
         "inlier_count": 100,
         "inlier_fraction": 1.0,
         "residual_std": 0.7616956256496666,
-        "label_noise_mad": 0.7730499434505185,
+        "label_noise_mad": 1.4053147072872032,  # lite: 0.7730499434505185
         "line_confidence": 440700.0739292007,
         "is_confident": True,
         "flagged": [],
@@ -113,7 +121,7 @@ GOLDEN = {
         "inlier_count": 94,
         "inlier_fraction": 0.94,
         "residual_std": 0.468066057311574,
-        "label_noise_mad": 0.4836682221847358,
+        "label_noise_mad": 0.9320623912020713,  # lite: 0.4836682221847358
         "line_confidence": 1839806.0873257914,
         "is_confident": True,
         "flagged": [7, 19, 33, 48, 62, 81],
@@ -124,7 +132,7 @@ GOLDEN = {
         "inlier_count": 5,
         "inlier_fraction": 1.0,
         "residual_std": 0.5259568804778961,
-        "label_noise_mad": 0.2838218445446909,
+        "label_noise_mad": 0.7837379305770504,  # lite: 0.2838218445446909
         "line_confidence": 252183.52947625107,
         "is_confident": True,
         "flagged": [],
@@ -135,7 +143,7 @@ GOLDEN = {
         "inlier_count": 19,
         "inlier_fraction": 0.95,
         "residual_std": 1.0880327589093377,
-        "label_noise_mad": 1.1620886586243588,
+        "label_noise_mad": 2.445725636973346,  # lite: 1.1620886586243588
         "line_confidence": 1.7025817179512779,
         "is_confident": False,
         "flagged": [],
@@ -230,7 +238,8 @@ def test_default_rng_seeding_matches_fishsense_lite():
     _assert_abc(fit, (-0.4104936654544967, 0.9118634495480843, -273.1568013358901))
     assert fit.inlier_count == 94
     assert fit.residual_std == pytest.approx(0.5141654971276408, rel=REL)
-    assert fit.label_noise_mad == pytest.approx(0.5894538224222293, rel=REL)
+    # lite: 0.5894538224222293 (see the module docstring)
+    assert fit.label_noise_mad == pytest.approx(0.8727912933595194, rel=REL)
     assert fit.line_confidence == pytest.approx(1720875.0554145924, rel=REL)
 
 

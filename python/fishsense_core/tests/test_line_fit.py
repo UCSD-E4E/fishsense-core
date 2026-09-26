@@ -95,3 +95,21 @@ def test_mad_floor_prevents_mass_flagging_when_inliers_are_subpixel_tight():
     assert fit is not None
     if fit.is_confident:
         assert flag_outliers(xy, fit).sum() <= 1
+
+
+def test_label_noise_mad_estimates_sigma_of_gaussian_label_noise():
+    """Regression: the MAD was taken over *absolute* perpendicular distances.
+    |d| of N(0, σ) is a folded normal whose scaled MAD is ~0.59σ, so the
+    "3σ" cut sat at ~1.78σ and flagged ~7.6% of clean labels instead of the
+    ~0.3% ``DEFAULT_OUTLIER_SIGMA`` promises. σ = 2.5 px keeps the 1 px floor
+    out of play; at prod noise (~1.85 px) the old cut superseded ~7 good
+    labels per 100-label dive."""
+    sigma = 2.5
+    xy = _line_points(2000, noise=sigma, seed=4)
+    fit = fit_dive_line(xy, rng=np.random.default_rng(0))
+    assert fit is not None
+    # `_line_points` adds the noise in y; across a slope-0.5 line that is
+    # sigma / hypot(1, 0.5) = 2.24 px perpendicular.
+    assert fit.label_noise_mad == pytest.approx(sigma / np.hypot(1.0, 0.5), rel=0.1)
+    # Expected ~0.27% of 2000 ≈ 5 under Gaussian noise; the bug flagged ~150.
+    assert flag_outliers(xy, fit).sum() <= 20

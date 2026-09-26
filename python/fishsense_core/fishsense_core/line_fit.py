@@ -9,7 +9,10 @@ https://github.com/UCSD-E4E/2026-05-02_laser_detector
 
 The numbers are load-bearing: v2's migrated ``dive_laser_lines`` rows were
 computed by the fishsense-lite copy, and ``tests/test_line_fit_golden.py``
-pins them. A change that moves them breaks parity with those rows.
+pins them. A change that moves them breaks parity with those rows. The one
+deliberate break is ``label_noise_mad``, which fishsense-lite estimated from
+absolute distances (~0.59 sigma, see ``fit_dive_line``); rows from before
+the fix carry the old, smaller value.
 
 Two surface differences from the research-repo module:
 
@@ -99,7 +102,7 @@ class LineFit:  # pylint: disable=too-many-instance-attributes
     inlier_fraction: float
     residual_std: float  # perp-distance std among inliers, in px (RANSAC tightness)
     label_noise_mad: (
-        float  # 1.4826 * MAD over ALL positive labels' perp distance, in px
+        float  # 1.4826 * MAD over ALL positive labels' SIGNED perp residual, in px
     )
     line_confidence: float  # along-line spread / perp spread (covariance eigenratio)
 
@@ -214,9 +217,16 @@ def fit_dive_line(  # pylint: disable=too-many-locals
     # applied against. ``residual_std`` is bounded by the RANSAC tolerance and
     # so under-states true label-noise scale; MAD is robust to the gross
     # outliers in the tail.
-    dist_all = np.abs(a * xy[:, 0] + b * xy[:, 1] + c)
+    #
+    # Signed residuals, not distances: MAD_TO_SIGMA assumes a normal sample,
+    # and |residual| is a folded normal whose scaled MAD is ~0.59 sigma. The
+    # fishsense-lite copy (and so the migrated v2 ``dive_laser_lines`` rows)
+    # used distances, which put the 3 sigma cut at ~1.78 sigma and flagged
+    # ~7.6% of clean labels. Sign-invariant, so LAPACK's choice of normal
+    # direction cannot move it.
+    resid_all = a * xy[:, 0] + b * xy[:, 1] + c
     label_noise_mad = float(
-        MAD_TO_SIGMA * np.median(np.abs(dist_all - np.median(dist_all)))
+        MAD_TO_SIGMA * np.median(np.abs(resid_all - np.median(resid_all)))
     )
 
     return LineFit(

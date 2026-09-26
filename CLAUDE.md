@@ -39,8 +39,9 @@ python/fishsense_core/
     laser.py                       # calibrate_laser() wraps _native.laser.calibrate_laser;
                                    #   re-exports the line fit below
     line_fit.py                    # Per-dive 2-D RANSAC laser line + outlier flags (numpy).
-                                   #   Numbers pinned by test_line_fit_golden.py: v2's
-                                   #   dive_laser_lines rows were computed by this code
+                                   #   Numbers pinned by test_line_fit_golden.py to v2's
+                                   #   dive_laser_lines rows (fishsense-lite's copy), except
+                                   #   label_noise_mad: lite's was ~0.59 sigma, fixed here
     image/image.py                 # Abstract Image base class
     image/decode.py                # DecodeConfig + the decode chain as functions;
                                    #   default is auto-gamma -> global CIELAB L*
