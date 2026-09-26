@@ -1,4 +1,4 @@
-"""Laser calibration and laser-dot detection."""
+"""Laser calibration, laser-dot detection, and the per-dive 2-D line fit."""
 import logging
 
 import numpy as np
@@ -9,12 +9,36 @@ from fishsense_core._laser_detector import (
     LaserDetector,
     LaserPrediction,
 )
+from fishsense_core.line_fit import (
+    COARSE_CALIBRATION_TOLERANCE_PX,
+    DEFAULT_OUTLIER_SIGMA,
+    LABEL_NOISE_MAD_FLOOR_PX,
+    LINE_CONFIDENCE_THRESHOLD,
+    MAD_TO_SIGMA,
+    MIN_POINTS_FOR_LINE,
+    RANSAC_INLIER_TOL_PX,
+    RANSAC_MAX_ITERS,
+    LineFit,
+    fit_dive_line,
+    flag_outliers,
+)
 
 __all__ = [
+    "COARSE_CALIBRATION_TOLERANCE_PX",
+    "DEFAULT_OUTLIER_SIGMA",
     "DEFAULT_RIG_PRIOR_BBOX",
+    "LABEL_NOISE_MAD_FLOOR_PX",
+    "LINE_CONFIDENCE_THRESHOLD",
     "LaserDetector",
     "LaserPrediction",
+    "LineFit",
+    "MAD_TO_SIGMA",
+    "MIN_POINTS_FOR_LINE",
+    "RANSAC_INLIER_TOL_PX",
+    "RANSAC_MAX_ITERS",
     "calibrate_laser",
+    "fit_dive_line",
+    "flag_outliers",
 ]
 
 _log = logging.getLogger(__name__)

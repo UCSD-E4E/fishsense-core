@@ -36,7 +36,11 @@ src/
 python/fishsense_core/
   src/lib.rs                       # PyO3 _native module — register submodules here
   fishsense_core/
-    laser.py                       # calibrate_laser() wraps _native.laser.calibrate_laser
+    laser.py                       # calibrate_laser() wraps _native.laser.calibrate_laser;
+                                   #   re-exports the line fit below
+    line_fit.py                    # Per-dive 2-D RANSAC laser line + outlier flags (numpy).
+                                   #   Numbers pinned by test_line_fit_golden.py: v2's
+                                   #   dive_laser_lines rows were computed by this code
     image/image.py                 # Abstract Image base class
     image/decode.py                # DecodeConfig + the decode chain as functions;
                                    #   default is auto-gamma -> global CIELAB L*
