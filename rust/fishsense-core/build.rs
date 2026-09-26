@@ -1,10 +1,14 @@
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
-const MODEL_URL: &str =
-    "https://huggingface.co/ccrutchf/fishial/resolve/main/fishial.onnx?download=true";
+use sha2::{Digest, Sha256};
+
+/// Offline or air-gapped builds: point this at a local copy of the pinned
+/// fishial.onnx and nothing is downloaded. The file is still checked against
+/// the manifest.
+const LOCAL_MODEL_ENV: &str = "FISHSENSE_FISHIAL_MODEL";
 const MAX_RETRIES: u32 = 5;
 // Only limit how long we wait to establish the connection, not the total
 // transfer time — the ONNX model is large and a per-byte timeout would fire
@@ -51,8 +55,8 @@ fn parse_retry_after(resp: &reqwest::blocking::Response) -> Option<Duration> {
     Some(Duration::from_secs(secs.min(MAX_BACKOFF_SECS)))
 }
 
-fn download(client: &reqwest::blocking::Client, dest: &std::path::Path) -> Result<(), FetchError> {
-    let mut response = client.get(MODEL_URL).send().map_err(|e| FetchError {
+fn download(client: &reqwest::blocking::Client, url: &str, dest: &Path) -> Result<(), FetchError> {
+    let mut response = client.get(url).send().map_err(|e| FetchError {
         msg: e.to_string(),
         retry_after: None,
         retryable: true, // transport/timeout errors are worth another try
@@ -83,12 +87,119 @@ fn download(client: &reqwest::blocking::Client, dest: &std::path::Path) -> Resul
     Ok(())
 }
 
+/// What the manifest pins for the embedded FishIAL: the default `fishial`
+/// version's server artifact, and where Hugging Face serves that revision.
+struct Pinned {
+    url: String,
+    sha256: String,
+    size: u64,
+}
+
+fn pinned_fishial(manifest_path: &Path) -> Pinned {
+    let text = std::fs::read_to_string(manifest_path)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", manifest_path.display()));
+    let table: toml::Table = text.parse().expect("models.toml is not valid TOML");
+    let model = table["model"]
+        .as_array()
+        .expect("models.toml: no [[model]]")
+        .iter()
+        .find(|m| {
+            m["name"].as_str() == Some("fishial")
+                && m.get("default").and_then(|d| d.as_bool()) == Some(true)
+        })
+        .expect("models.toml: no default fishial version");
+    let artifact = model["artifact"]
+        .as_array()
+        .expect("models.toml: fishial has no artifact")
+        .iter()
+        .find(|a| {
+            a["targets"]
+                .as_array()
+                .is_some_and(|t| t.iter().any(|t| t.as_str() == Some("server")))
+        })
+        .expect("models.toml: fishial has no server artifact");
+    let hf = &model["origin"]["huggingface"];
+    Pinned {
+        url: format!(
+            "https://huggingface.co/{}/resolve/{}/{}?download=true",
+            hf["repo"].as_str().expect("fishial origin repo"),
+            hf["revision"].as_str().expect("fishial origin revision"),
+            artifact["filename"].as_str().expect("fishial filename"),
+        ),
+        sha256: artifact["sha256"]
+            .as_str()
+            .expect("fishial sha256")
+            .to_ascii_lowercase(),
+        size: artifact["size"].as_integer().expect("fishial size") as u64,
+    }
+}
+
+/// `Ok` if `path` is exactly the pinned file.
+fn check(path: &Path, pinned: &Pinned) -> Result<(), String> {
+    let size = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+    if size != pinned.size {
+        return Err(format!("expected {} bytes, got {size}", pinned.size));
+    }
+    let mut hasher = Sha256::new();
+    let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    std::io::copy(&mut file, &mut hasher).map_err(|e| e.to_string())?;
+    let got: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    if got != pinned.sha256 {
+        return Err(format!("expected sha256 {}, got {got}", pinned.sha256));
+    }
+    Ok(())
+}
+
 fn main() {
+    let manifest_dir =
+        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set"));
+    let pinned = pinned_fishial(&manifest_dir.join("models.toml"));
+
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=models.toml");
+    println!("cargo:rerun-if-env-changed={LOCAL_MODEL_ENV}");
+
+    // A local copy wins, and never touches the network.
+    if let Some(local) = std::env::var_os(LOCAL_MODEL_ENV) {
+        // Absolute, so the file checked here is the file embedded:
+        // `include_bytes!` resolves a relative path from the source file that
+        // uses it (src/fish/), not from here. A relative value resolves from
+        // the crate directory, which is this script's working directory.
+        let local = PathBuf::from(&local).canonicalize().unwrap_or_else(|e| {
+            panic!(
+                "{LOCAL_MODEL_ENV}={} (relative paths resolve from {}): {e}",
+                PathBuf::from(&local).display(),
+                manifest_dir.display()
+            )
+        });
+        // Otherwise new bytes written to the same path would skip this check
+        // on the next build yet still be picked up by `include_bytes!`.
+        println!("cargo:rerun-if-changed={}", local.display());
+        if let Err(e) = check(&local, &pinned) {
+            panic!(
+                "{LOCAL_MODEL_ENV}={} is not the pinned fishial.onnx: {e}",
+                local.display()
+            );
+        }
+        println!("cargo:rustc-env=FISHIAL_MODEL_PATH={}", local.display());
+        return;
+    }
+
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR not set"));
     let model_path = out_dir.join("fishial.onnx");
 
+    // A copy cached by an earlier build is reused only if it is still the
+    // pinned file. Before the pin, the cache held whatever HF `main` served
+    // that day, and a later bump of the pin must not keep embedding old bytes.
+    if model_path.exists()
+        && let Err(e) = check(&model_path, &pinned)
+    {
+        eprintln!("build.rs: cached fishial.onnx is stale ({e}); downloading again");
+        std::fs::remove_file(&model_path).expect("failed to remove stale fishial.onnx");
+    }
+
     if !model_path.exists() {
-        eprintln!("build.rs: downloading fishial.onnx from HuggingFace …");
+        eprintln!("build.rs: downloading {} …", pinned.url);
 
         let client = reqwest::blocking::Client::builder()
             .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
@@ -102,8 +213,14 @@ fn main() {
         let tmp_path = model_path.with_extension("onnx.tmp");
         let mut last_err: Option<String> = None;
         for attempt in 1..=MAX_RETRIES {
-            match download(&client, &tmp_path) {
+            match download(&client, &pinned.url, &tmp_path) {
                 Ok(()) => {
+                    // A wrong file is not a transient failure: fail the build
+                    // rather than embed it, or retry into the same bytes.
+                    if let Err(e) = check(&tmp_path, &pinned) {
+                        let _ = std::fs::remove_file(&tmp_path);
+                        panic!("downloaded fishial.onnx is not the pinned file: {e}");
+                    }
                     std::fs::rename(&tmp_path, &model_path)
                         .expect("failed to move downloaded model into place");
                     eprintln!("build.rs: model saved to {}", model_path.display());
@@ -139,8 +256,4 @@ fn main() {
         "cargo:rustc-env=FISHIAL_MODEL_PATH={}",
         model_path.display()
     );
-
-    // Re-run only if this script itself changes; the cached model in OUT_DIR
-    // persists across incremental rebuilds automatically.
-    println!("cargo:rerun-if-changed=build.rs");
 }

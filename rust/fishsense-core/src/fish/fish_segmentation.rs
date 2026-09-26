@@ -1,4 +1,6 @@
+use std::borrow::Cow;
 use std::cmp::{max, min};
+use std::path::PathBuf;
 
 use tracing::{debug, info, instrument, warn};
 
@@ -11,6 +13,7 @@ use imageproc::point::Point;
 use ndarray::{s, Array2, Array3, ArrayD, IxDyn};
 
 use crate::fish::fish_geometry::trace_outer_contours;
+use crate::models::{self, Manifest, ModelError, ModelRef, Target, Verify};
 use ort::logging::LogLevel;
 use ort::session::{Session, builder::GraphOptimizationLevel};
 use ort::value::TensorRef;
@@ -19,8 +22,22 @@ use thiserror::Error;
 // The ONNX model is downloaded by build.rs and embedded at compile time.
 // This means the binary is self-contained — no runtime network access is
 // needed, which works correctly for both the Python wheel and the Flutter
-// plugin.
+// plugin. build.rs checks the bytes against `models.toml` before embedding.
 static MODEL_BYTES: &[u8] = include_bytes!(env!("FISHIAL_MODEL_PATH"));
+
+/// The manifest name of the model this type runs.
+pub const MODEL_NAME: &str = "fishial";
+
+/// Where [`FishSegmentation::from_source`] gets the FishIAL weights.
+#[derive(Debug, Clone)]
+pub enum ModelSource {
+    /// The copy compiled into this binary (what [`FishSegmentation::new`] uses).
+    Embedded,
+    /// Bytes the caller already holds.
+    Bytes(Vec<u8>),
+    /// A file on disk, e.g. a resource in a mobile app bundle.
+    Path(PathBuf),
+}
 
 #[derive(Error, Debug)]
 pub enum SegmentationError {
@@ -28,6 +45,8 @@ pub enum SegmentationError {
     CVToNDArrayError(String),
     #[error("fish not found in image")]
     FishNotFound,
+    #[error(transparent)]
+    Model(#[from] ModelError),
     #[error("model has not been loaded — call load_model() first")]
     ModelLoadError,
     #[error("ndarray → image buffer conversion failed")]
@@ -44,6 +63,11 @@ pub struct FishSegmentation {
     model_set: bool,
     model: Option<Session>,
     active_provider: Option<ActiveProvider>,
+    /// Weights not yet turned into a session. Dropped once `load_model`
+    /// succeeds, so a phone does not hold a second copy of the model for the
+    /// life of the process.
+    model_bytes: Option<Cow<'static, [u8]>>,
+    model_ref: ModelRef,
 }
 
 /// The execution provider that ORT registered for this session — useful for
@@ -100,7 +124,51 @@ impl FishSegmentation {
             model_set: false,
             model: None,
             active_provider: None,
+            model_bytes: Some(Cow::Borrowed(MODEL_BYTES)),
+            // build.rs embeds exactly this artifact (it checks the hash), and
+            // `builtin_manifest_is_valid` pins that it resolves.
+            model_ref: Manifest::builtin()
+                .resolve(MODEL_NAME, None, Target::Server)
+                .expect("builtin manifest has a fishial server artifact"),
         }
+    }
+
+    /// Creates a `FishSegmentation` from weights the caller supplies, checked
+    /// against the manifest's pinned FishIAL artifact for `target`.
+    ///
+    /// This is the offline path for mobile: the app ships the file in its
+    /// bundle and passes its path. Nothing here touches the network. `verify`
+    /// is [`Verify::Size`] for a file something else vouches for (a
+    /// code-signed bundle), [`Verify::Full`] otherwise. `Embedded` skips the
+    /// check, since build.rs already made it.
+    ///
+    /// Call [`load_model`] before [`inference`], as with [`new`].
+    pub fn from_source(
+        source: ModelSource,
+        target: Target,
+        verify: Verify,
+    ) -> Result<FishSegmentation, SegmentationError> {
+        let model_ref = Manifest::builtin().resolve(MODEL_NAME, None, target)?;
+        let bytes: Cow<'static, [u8]> = match source {
+            ModelSource::Embedded => Cow::Borrowed(MODEL_BYTES),
+            ModelSource::Bytes(b) => Cow::Owned(b),
+            ModelSource::Path(p) => Cow::Owned(std::fs::read(p).map_err(ModelError::from)?),
+        };
+        if let Cow::Owned(b) = &bytes {
+            models::verify(&model_ref, b, verify)?;
+        }
+        Ok(FishSegmentation {
+            model_set: false,
+            model: None,
+            active_provider: None,
+            model_bytes: Some(bytes),
+            model_ref,
+        })
+    }
+
+    /// Provenance for results this instance produces: `fishial/<version>@<sha256[:12]>`.
+    pub fn model_id(&self) -> String {
+        self.model_ref.id()
     }
 
     /// Returns the execution provider that was registered when the session
@@ -158,7 +226,7 @@ impl FishSegmentation {
         Ok(builder)
     }
 
-    fn create_model() -> Result<(Session, ActiveProvider), ort::Error> {
+    fn create_model(model: &[u8]) -> Result<(Session, ActiveProvider), ort::Error> {
         // Try accelerated EPs first with `error_on_failure` so registration
         // failures (e.g. missing CUDA libs at runtime) surface here and we
         // can fall back to CPU explicitly. ORT's default behaviour is to log
@@ -176,7 +244,7 @@ impl FishSegmentation {
                 Ok(mut b) => {
                     info!("ORT registered CUDAExecutionProvider");
                     return b
-                        .commit_from_memory(MODEL_BYTES)
+                        .commit_from_memory(model)
                         .map(|s| (s, ActiveProvider::Cuda));
                 }
                 Err(e) => warn!("CUDA EP unavailable, falling back to CPU: {e}"),
@@ -194,7 +262,7 @@ impl FishSegmentation {
                 Ok(mut b) => {
                     info!("ORT registered CoreMLExecutionProvider");
                     return b
-                        .commit_from_memory(MODEL_BYTES)
+                        .commit_from_memory(model)
                         .map(|s| (s, ActiveProvider::CoreMl));
                 }
                 Err(e) => warn!("CoreML EP unavailable, falling back to CPU: {e}"),
@@ -203,19 +271,24 @@ impl FishSegmentation {
 
         let mut builder = Self::build_session_options()?;
         builder
-            .commit_from_memory(MODEL_BYTES)
+            .commit_from_memory(model)
             .map(|s| (s, ActiveProvider::Cpu))
     }
 
     #[instrument(skip(self))]
     pub fn load_model(&mut self) -> Result<(), SegmentationError> {
         if !self.model_set {
-            debug!("loading embedded ONNX model");
-            let (session, provider) = Self::create_model()?;
+            debug!(model = %self.model_ref.id(), "loading ONNX model");
+            let bytes = self
+                .model_bytes
+                .as_deref()
+                .ok_or(SegmentationError::ModelLoadError)?;
+            let (session, provider) = Self::create_model(bytes)?;
             self.model = Some(session);
             self.active_provider = Some(provider);
             self.model_set = true;
-            info!(provider = provider.as_str(), "model loaded");
+            self.model_bytes = None;
+            info!(provider = provider.as_str(), model = %self.model_ref.id(), "model loaded");
         } else {
             debug!("model already loaded, skipping");
         }
@@ -1028,6 +1101,80 @@ mod tests {
         // registration; just assert it's set to *something*.
         #[cfg(any(feature = "cuda", feature = "coreml"))]
         assert!(s.active_provider().is_some());
+    }
+
+    // ── model source & identity ───────────────────────────────────────────
+
+    /// The bytes in this binary are the manifest's pinned FishIAL. Before
+    /// the pin, build.rs embedded whatever Hugging Face `main` served on
+    /// build day, and nothing would have noticed it changing.
+    #[test]
+    fn embedded_model_is_the_pinned_artifact() {
+        let pinned = Manifest::builtin()
+            .resolve(MODEL_NAME, None, Target::Server)
+            .unwrap();
+        models::verify(&pinned, MODEL_BYTES, Verify::Full).unwrap();
+        assert_eq!(FishSegmentation::new().model_id(), pinned.id());
+    }
+
+    /// The mobile path: the same weights shipped as a file, checked, loaded
+    /// and usable, with no network involved.
+    #[test]
+    fn from_source_loads_a_bundled_file() {
+        let path = std::env::temp_dir().join(format!("fishial-{}.onnx", std::process::id()));
+        std::fs::write(&path, MODEL_BYTES).unwrap();
+        let mut s = FishSegmentation::from_source(
+            ModelSource::Path(path.clone()),
+            Target::MobileCoreml,
+            Verify::Full,
+        )
+        .unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(s.model_id(), FishSegmentation::new().model_id());
+        s.load_model().unwrap();
+        assert!(s.model_bytes.is_none(), "weights are released once the session exists");
+        s.inference(&Array3::<u8>::zeros((100, 200, 3))).unwrap();
+    }
+
+    #[test]
+    fn from_source_rejects_bytes_that_are_not_the_pinned_model() {
+        let mut wrong = MODEL_BYTES.to_vec();
+        wrong[0] ^= 0xff;
+        let err = FishSegmentation::from_source(
+            ModelSource::Bytes(wrong),
+            Target::Server,
+            Verify::Full,
+        )
+        .err()
+        .expect("tampered weights must not load");
+        assert!(
+            matches!(err, SegmentationError::Model(ModelError::HashMismatch { .. })),
+            "{err}"
+        );
+
+        let err = FishSegmentation::from_source(
+            ModelSource::Bytes(MODEL_BYTES[..1024].to_vec()),
+            Target::Server,
+            Verify::Size,
+        )
+        .err()
+        .expect("a truncated file must not load");
+        assert!(
+            matches!(err, SegmentationError::Model(ModelError::SizeMismatch { .. })),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn from_source_reports_a_missing_file_as_an_error() {
+        let err = FishSegmentation::from_source(
+            ModelSource::Path("/nonexistent/fishial.onnx".into()),
+            Target::MobileCoreml,
+            Verify::Size,
+        )
+        .err()
+        .expect("missing file");
+        assert!(matches!(err, SegmentationError::Model(ModelError::Io(_))), "{err}");
     }
 
     // ── segmentation regression against a committed fixture ───────────────

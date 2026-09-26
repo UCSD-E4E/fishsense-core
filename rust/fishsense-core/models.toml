@@ -1,0 +1,73 @@
+# Every model weight file fishsense-core knows how to load, and the one thing
+# that identifies it: its sha256. The file name and version label identify
+# nothing; the hash does.
+#
+# This file is the single copy. The Rust crate compiles it in
+# (`models::MANIFEST_TOML`), `build.rs` reads it to pin the FishIAL download it
+# embeds, and Python reads the same bytes through
+# `_native.models.manifest_toml()`.
+#
+# Layout:
+#   [[model]]                one (name, version). Exactly one version per name
+#                            has `default = true`: what a caller gets when it
+#                            does not name a version. Pinning here means the
+#                            model a result used follows from `core_version`.
+#   [model.origin.<kind>]    optional public place the bytes can be fetched
+#                            from. A store may use it; the hash still decides.
+#   [[model.artifact]]       one file, and the targets it serves. A model
+#                            version has at most one artifact per target:
+#                              server         full precision, server runtimes
+#                              mobile-coreml  on-device, ORT + CoreML EP
+#                            A target a model has no artifact for is simply
+#                            absent, and resolving it is an error, never a
+#                            fallback to another target's file.
+#
+# Not here yet: SAM 3.1 (`sam3` / `3.1` / `sam3.1_multiplex.pt`, 3502755717
+# bytes). facebook/sam3.1 is gated and does not publish the hash; it gets an
+# entry once the copy in the `model-weights` bucket has been hashed.
+
+[[model]]
+name = "fishial"
+version = "1"
+default = true
+
+[model.origin.huggingface]
+repo = "ccrutchf/fishial"
+revision = "ec1533a0869db778627079aaa6300d230bea8ca5"
+
+[[model.artifact]]
+# The same ONNX graph runs on both: CoreML is an ORT execution provider, not a
+# separate model format.
+targets = ["server", "mobile-coreml"]
+filename = "fishial.onnx"
+sha256 = "f721445f37db6919ae7d534e922ca679a0425687fdc6d33225929fbe39548f0e"
+size = 223214651
+
+[[model]]
+name = "laser-detector"
+version = "run3"
+default = true
+
+[model.origin.huggingface]
+repo = "ucsde4e/fishsense-laser-detector"
+revision = "e4bf9b2e545b210a615129556a5cb747c101986a"
+
+[[model.artifact]]
+targets = ["server"]
+filename = "run3_epoch_021.pt"
+sha256 = "bd3ab8f5e273da37a1f2dfc2c6c6a36735b89ae26ff821b71b1f8acce3a74d68"
+size = 294473278
+
+[[model]]
+name = "laser-detector"
+version = "run7-hrnet"
+
+[model.origin.huggingface]
+repo = "ucsde4e/fishsense-laser-detector"
+revision = "e4bf9b2e545b210a615129556a5cb747c101986a"
+
+[[model.artifact]]
+targets = ["server"]
+filename = "run7_hrnet_w18_epoch_021.pt"
+sha256 = "17a4cd13358fe98093ad06cb9097d7ced844b305784cc32a6d26ead63dae6577"
+size = 196071469

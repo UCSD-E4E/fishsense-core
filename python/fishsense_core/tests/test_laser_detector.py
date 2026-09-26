@@ -422,6 +422,24 @@ def test_canonical_name_is_none_for_unknown_checkpoint(tmp_path):
     assert ld._canonical_checkpoint_name(p) is None
 
 
+def test_module_imports_without_native():
+    """The detector is plain Python and must import without a compiled
+    `_native` (a venv whose Python has no matching build, or `_native` stubbed
+    with a numpy stand-in). The checkpoint hashes come from the model manifest,
+    which lives in `_native`, so they must be read on first use, not at import."""
+    import subprocess  # pylint: disable=import-outside-toplevel
+    import sys  # pylint: disable=import-outside-toplevel
+
+    code = (
+        "import sys; sys.modules['fishsense_core._native'] = None; "
+        "import fishsense_core._laser_detector"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_published_checkpoint_hashes_map_to_canonical_names():
     # Every hashed checkpoint must name one that also has an encoder and offset.
     for name in ld.CHECKPOINT_SHA256.values():

@@ -32,6 +32,13 @@ impl FishSegmentation {
         self.inner.active_provider().map(|p| p.as_str())
     }
 
+    /// Provenance of the weights this instance runs,
+    /// `fishial/<version>@<sha256[:12]>`, from the manifest in
+    /// `fishsense_core.models`. Record it with every result.
+    fn model_id(&self) -> String {
+        self.inner.model_id()
+    }
+
     fn inference<'py>(
         &mut self,
         py: Python<'py>,

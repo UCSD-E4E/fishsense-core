@@ -34,6 +34,20 @@ jobs:
     # in the standard CI is not worth a broken pipeline.
     - name: Lint
       run: cargo clippy --verbose --all-targets -- -D warnings
+    # fishsense-mobile runs in the field with no Internet, on this crate built
+    # `default-features = false, features = ["coreml"]`. Models reach it through
+    # the app bundle, never a download, so that build must not link an HTTP
+    # client at all. `-e normal` leaves out build-dependencies: build.rs may
+    # download (it pins and checks FishIAL), the library may not.
+    - name: Mobile build has no runtime network code
+      run: |
+        hits=$(cargo tree -p fishsense-core -e normal --no-default-features --features coreml \
+          | grep -E '\b(reqwest|hyper|ureq|curl)\b' || true)
+        if [ -n "$hits" ]; then
+          echo "::error::the mobile (coreml) build depends on an HTTP client:"
+          echo "$hits"
+          exit 1
+        fi
     - name: Run tests
       run: cargo test --verbose
 
