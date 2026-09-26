@@ -17,11 +17,14 @@ pyproject.toml            # Root uv workspace + fishsense-meta package
 ```
 src/
   errors.rs                        # FishSenseError enum
+  models/mod.rs                    # Manifest (compiled-in ../models.toml), ModelRef, verify();
+                                   #   model identity by sha256, no network
   world_point_handler.rs           # WorldPointHandler — projects image coords to 3D via K⁻¹;
                                    #   compute_world_point_from_laser_with_residual adds the
                                    #   camera-ray/laser closest-approach distance
   laser/calibration.rs             # calibrate_laser() — 3D laser origin + orientation
-  fish/fish_segmentation.rs        # FishSegmentation — ONNX instance segmentation (FishIAL)
+  fish/fish_segmentation.rs        # FishSegmentation — ONNX instance segmentation (FishIAL);
+                                   #   new() = embedded, from_source() = bundled file (mobile)
   fish/fish_head_tail_detector.rs  # FishHeadTailDetector — PCA + geometry head/tail; predict_keypoint_depths method
   fish/fish_length_calculator.rs   # FishLengthCalculator — 3D fish length from depth map
   fish/fish_pca.rs                 # estimate_endpoints() — PCA on fish mask
@@ -36,6 +39,11 @@ src/
 python/fishsense_core/
   src/lib.rs                       # PyO3 _native module — register submodules here
   fishsense_core/
+    models.py                      # fetch(name, version, store=, cache_dir=) — verified,
+                                   #   cached model loading; the store is injected
+                                   #   (LocalDirStore / HuggingFaceStore in core; credentialed
+                                   #   stores live in the caller). `python -m ... prefetch`
+    fish/sam3.py                   # SAM 3.1 loader; `sam3` itself is caller-installed
     laser.py                       # calibrate_laser() wraps _native.laser.calibrate_laser;
                                    #   re-exports the line fit below
     line_fit.py                    # Per-dive 2-D RANSAC laser line + outlier flags (numpy).
@@ -99,6 +107,24 @@ reads 1.01; nothing legitimate lands in between).
 ## ONNX model (fish segmentation)
 
 `build.rs` downloads the FishIAL model from HuggingFace at compile time and embeds it with `include_bytes!`. No network access is needed at runtime. The model is a Mask R-CNN variant; score threshold = 0.3, mask threshold = 0.5.
+
+The download is pinned: `build.rs` takes the HF revision, sha256 and size from
+`rust/fishsense-core/models.toml` and fails the build on any mismatch (a stale
+cached copy is re-downloaded). Set `FISHSENSE_FISHIAL_MODEL=/path/fishial.onnx`
+to build with no network; the file is still checked.
+
+## Model manifest (`rust/fishsense-core/models.toml`)
+
+The one list of model weights core knows, identified by sha256 per target
+(`server`, `mobile-coreml`). Rust compiles it in; Python reads the same bytes via
+`_native.models.manifest_toml()` (a test pins them equal). Changing a pinned
+model means editing this file, which means a core release — deliberately, so
+`core_version` determines the model. SAM 3.1 is not listed yet: its HF repo is
+gated and hides the hash, so it waits on hashing the `model-weights` bucket copy.
+
+fishsense-mobile builds this crate `default-features = false, features =
+["coreml"]` and must work offline. The `Mobile build has no runtime network code`
+step in `rust.yml` fails if that build links an HTTP client.
 
 ## Build commands
 

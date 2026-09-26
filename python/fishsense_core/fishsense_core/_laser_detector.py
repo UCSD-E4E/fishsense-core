@@ -34,6 +34,7 @@ from __future__ import annotations
 # pylint: disable=too-many-lines,import-outside-toplevel,import-error
 # pylint: disable=too-many-arguments,too-many-positional-arguments,no-member
 
+import functools
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,6 +44,7 @@ import cv2
 import numpy as np
 
 from fishsense_core.camera_intrinsics import CameraIntrinsics
+from fishsense_core.models import Manifest, WeightStore, builtin_manifest, fetch
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import torch
@@ -113,17 +115,31 @@ CHECKPOINT_ENCODERS: dict[str, str] = {
     "run7_hrnet_w18_epoch_021.pt": "tu-hrnet_w18",
 }
 
+# The manifest name (fishsense_core.models) of the published checkpoints.
+LASER_MODEL_NAME = "laser-detector"
+
 # Content hashes (sha256 of the raw .pt bytes) of the published checkpoints, so
 # a local copy resolves to its canonical name — and therefore its encoder and
 # bias offset — regardless of the filename it was saved under. Filename is a
 # fragile identity: a run3 checkpoint saved as `epoch_021.pt` would otherwise
 # lose its bias-offset calibration silently. Identity by content is not.
-CHECKPOINT_SHA256: dict[str, str] = {
-    "bd3ab8f5e273da37a1f2dfc2c6c6a36735b89ae26ff821b71b1f8acce3a74d68":
-        "run3_epoch_021.pt",
-    "17a4cd13358fe98093ad06cb9097d7ced844b305784cc32a6d26ead63dae6577":
-        "run7_hrnet_w18_epoch_021.pt",
-}
+# Read from the model manifest, so the hashes live in one place, and read on
+# first use: the manifest lives in `_native`, and this module must import
+# without it. `CHECKPOINT_SHA256` stays a module attribute (via `__getattr__`)
+# and is always the same dict, so callers may read or patch it in place.
+@functools.cache
+def _checkpoint_sha256() -> dict[str, str]:
+    return {
+        ref.sha256: ref.filename
+        for ref in builtin_manifest().refs
+        if ref.name == LASER_MODEL_NAME
+    }
+
+
+def __getattr__(name: str) -> Any:
+    if name == "CHECKPOINT_SHA256":
+        return _checkpoint_sha256()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 DEFAULT_DECODER_INTERPOLATION = "nearest"
 DEFAULT_PRESENCE_HIDDEN = 128
 
@@ -560,7 +576,7 @@ def _canonical_checkpoint_name(path: Path) -> str | None:
     import hashlib  # noqa: PLC0415
 
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    return CHECKPOINT_SHA256.get(digest)
+    return _checkpoint_sha256().get(digest)
 
 
 # --------------------------------------------------------------------------
@@ -763,6 +779,43 @@ class LaserDetector:
             ) from exc
 
         path = hf_hub_download(repo_id, filename, revision=revision)
+        return cls.from_checkpoint(path, device=device, **kwargs)
+
+    @classmethod
+    def from_store(
+        cls,
+        store: WeightStore | None,
+        *,
+        cache_dir: str | Path,
+        version: str | None = None,
+        device: "torch.device | str | None" = None,
+        manifest: Manifest | None = None,
+        **kwargs: Any,
+    ) -> "LaserDetector":
+        """Load a pinned checkpoint through :func:`fishsense_core.models.fetch`.
+
+        The bytes come from ``store`` (injected: a Garage or MLflow adapter,
+        :class:`~fishsense_core.models.HuggingFaceStore`, or
+        :class:`~fishsense_core.models.LocalDirStore`) and are checked against
+        the manifest's sha256 before loading. ``store=None`` loads only from
+        ``cache_dir`` and never touches the network.
+
+        Args:
+            store: Where to get the checkpoint on a cache miss.
+            cache_dir: Root of the model cache.
+            version: Manifest version (``"run3"``, ``"run7-hrnet"``);
+                ``None`` is the pinned default.
+            device: Torch device; defaults to CUDA when available.
+            manifest: Override the built-in manifest (tests).
+            **kwargs: Passed to :meth:`from_checkpoint`.
+        """
+        path = fetch(
+            LASER_MODEL_NAME,
+            version,
+            store=store,
+            cache_dir=cache_dir,
+            manifest=manifest,
+        )
         return cls.from_checkpoint(path, device=device, **kwargs)
 
     # -- inference ----------------------------------------------------------
