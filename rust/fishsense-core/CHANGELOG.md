@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.1.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v4.0.0...fishsense-core-v4.1.0) (2026-09-26)
+
+
+### Features
+
+* **models:** load model weights by name and version, verified against a pinned manifest ([#84](https://github.com/UCSD-E4E/fishsense-core/issues/84)) ([56b8d2c](https://github.com/UCSD-E4E/fishsense-core/commit/56b8d2c934239bbcecfa56d6b99e0e01cfea230a))
+
 ## [4.0.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v3.0.0...fishsense-core-v4.0.0) (2026-09-05)
 
 

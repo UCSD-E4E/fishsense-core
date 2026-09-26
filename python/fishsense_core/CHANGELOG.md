@@ -1,5 +1,19 @@
 # Changelog
 
+## [4.1.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v4.0.0...fishsense_core-v4.1.0) (2026-09-26)
+
+
+### Features
+
+* **image:** give the core its own CameraIntrinsics, drop the API SDK ([#83](https://github.com/UCSD-E4E/fishsense-core/issues/83)) ([e85c81f](https://github.com/UCSD-E4E/fishsense-core/commit/e85c81f9d16ae382c0a502fe81f6365ba04409d9))
+* **laser:** add the per-dive 2-D laser line fit ([#82](https://github.com/UCSD-E4E/fishsense-core/issues/82)) ([24e1013](https://github.com/UCSD-E4E/fishsense-core/commit/24e1013c9a1bd1cd2b7d4586ae8c9fc120bdac60))
+* **models:** load model weights by name and version, verified against a pinned manifest ([#84](https://github.com/UCSD-E4E/fishsense-core/issues/84)) ([56b8d2c](https://github.com/UCSD-E4E/fishsense-core/commit/56b8d2c934239bbcecfa56d6b99e0e01cfea230a))
+
+
+### Bug Fixes
+
+* **laser:** correct the line fit's noise estimate and its confidence on stacked labels ([#85](https://github.com/UCSD-E4E/fishsense-core/issues/85)) ([c91d639](https://github.com/UCSD-E4E/fishsense-core/commit/c91d63926325e6d07b23c9a7f7909171ec5ad85b))
+
 ## [4.0.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v3.0.0...fishsense_core-v4.0.0) (2026-09-05)
 
 
