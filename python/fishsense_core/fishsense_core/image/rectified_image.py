@@ -4,16 +4,7 @@ import logging
 
 import numpy as np
 
-try:
-    from fishsense_api_sdk.models.camera_intrinsics import CameraIntrinsics
-except ImportError as exc:  # pragma: no cover - depends on install extras
-    raise ImportError(
-        "RectifiedImage requires the FishSense API SDK, which is not a base "
-        "dependency (it is git-only and would make the wheel un-pip-installable). "
-        "Install the extra: pip install 'fishsense_core[rectified]'. Note the "
-        "laser detector and its own output rectification do not need this."
-    ) from exc
-
+from fishsense_core.camera_intrinsics import CameraIntrinsics
 from fishsense_core.image.decode import rectify
 from fishsense_core.image.image import Image
 
@@ -21,7 +12,12 @@ _log = logging.getLogger(__name__)
 
 
 class RectifiedImage(Image):
-    """Represents a rectified image using camera intrinsics to correct distortion."""
+    """Represents a rectified image using camera intrinsics to correct distortion.
+
+    ``intrinsics`` is a :class:`~fishsense_core.CameraIntrinsics`, or anything
+    else exposing ``camera_matrix`` and ``distortion_coefficients`` — the API
+    SDK's ``CameraIntrinsics`` is accepted but not required.
+    """
 
     # pylint: disable=no-member
 
