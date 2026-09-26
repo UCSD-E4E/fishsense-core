@@ -48,8 +48,10 @@ python/fishsense_core/
                                    #   re-exports the line fit below
     line_fit.py                    # Per-dive 2-D RANSAC laser line + outlier flags (numpy).
                                    #   Numbers pinned by test_line_fit_golden.py to v2's
-                                   #   dive_laser_lines rows (fishsense-lite's copy), except
-                                   #   label_noise_mad: lite's was ~0.59 sigma, fixed here
+                                   #   dive_laser_lines rows (fishsense-lite's copy). Two
+                                   #   deliberate breaks: label_noise_mad (lite's was ~0.59
+                                   #   sigma), and line_confidence is 0, not inf, when the
+                                   #   inliers sit on < MIN_DISTINCT_LOCATIONS (3) pixels
     camera_intrinsics.py           # CameraIntrinsics (K + distortion), exported at the
                                    #   package root. Consumers duck-type on its two
                                    #   attributes; nothing may import fishsense_api_sdk
