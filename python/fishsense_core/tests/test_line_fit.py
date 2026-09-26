@@ -113,3 +113,48 @@ def test_label_noise_mad_estimates_sigma_of_gaussian_label_noise():
     assert fit.label_noise_mad == pytest.approx(sigma / np.hypot(1.0, 0.5), rel=0.1)
     # Expected ~0.27% of 2000 ≈ 5 under Gaussian noise; the bug flagged ~150.
     assert flag_outliers(xy, fit).sum() <= 20
+
+
+# ---------------------------------------------------------------------------
+# Not from fishsense-lite: positives stacked on one or two locations.
+#
+# The perpendicular variance is exactly 0 there, which the confidence ratio
+# used to read as a perfect line (inf -> confident). One location fixes no
+# direction, and two fix one with no redundancy (the reason fits below
+# MIN_POINTS_FOR_LINE are refused) — so neither may be acted on.
+# ---------------------------------------------------------------------------
+
+
+def test_positives_on_one_location_are_not_confident():
+    xy = np.tile([[812.0, 431.0]], (MIN_POINTS_FOR_LINE + 3, 1))
+    fit = fit_dive_line(xy, rng=np.random.default_rng(0))
+    assert fit is not None
+    assert not fit.is_confident
+    assert not flag_outliers(xy, fit).any()
+
+
+def test_positives_on_two_locations_are_not_confident():
+    xy = np.array([[100.0, 100.0]] * 4 + [[900.0, 500.0]] * 4)
+    fit = fit_dive_line(xy, rng=np.random.default_rng(0))
+    assert fit is not None
+    assert not fit.is_confident
+
+
+def test_line_through_two_stacked_locations_does_not_flag_a_third():
+    """What the old behaviour cost: a line pinned by two spots was trusted,
+    so a label anywhere else got flagged against it."""
+    xy = np.array([[100.0, 100.0]] * 4 + [[900.0, 500.0]] * 4 + [[500.0, 900.0]])
+    fit = fit_dive_line(xy, rng=np.random.default_rng(0))
+    assert fit is not None
+    assert fit.inlier_count == 8
+    assert not fit.is_confident
+    assert not flag_outliers(xy, fit).any()
+
+
+def test_three_stacked_collinear_locations_stay_confident():
+    """The fix keys on distinct locations, not on zero perpendicular
+    variance: three agreeing spots are still a determined line."""
+    xy = np.array([[100.0, 100.0]] * 3 + [[500.0, 300.0]] * 3 + [[900.0, 500.0]] * 3)
+    fit = fit_dive_line(xy, rng=np.random.default_rng(0))
+    assert fit is not None
+    assert fit.is_confident

@@ -9,10 +9,15 @@ https://github.com/UCSD-E4E/2026-05-02_laser_detector
 
 The numbers are load-bearing: v2's migrated ``dive_laser_lines`` rows were
 computed by the fishsense-lite copy, and ``tests/test_line_fit_golden.py``
-pins them. A change that moves them breaks parity with those rows. The one
-deliberate break is ``label_noise_mad``, which fishsense-lite estimated from
-absolute distances (~0.59 sigma, see ``fit_dive_line``); rows from before
-the fix carry the old, smaller value.
+pins them. A change that moves them breaks parity with those rows. Two
+deliberate breaks:
+
+* ``label_noise_mad``, which fishsense-lite estimated from absolute distances
+  (~0.59 sigma, see ``fit_dive_line``); rows from before the fix carry the
+  old, smaller value.
+* ``line_confidence`` on a dive whose inliers sit on one or two distinct
+  locations, which fishsense-lite scored ``inf`` (confident) and this scores
+  0 (see ``_line_confidence``). None of the golden cases is one.
 
 Two surface differences from the research-repo module:
 
@@ -36,6 +41,12 @@ import numpy as np
 # (2 points) always succeeds; we want enough redundancy for RANSAC to mean
 # something.
 MIN_POINTS_FOR_LINE = 5
+
+# Minimum distinct inlier locations for a line to count as confident. Labels
+# stacked on one or two pixels pass MIN_POINTS_FOR_LINE but determine the line
+# no better than 1-2 points do. Not in fishsense-lite, which scored them inf;
+# no golden case has fewer than 3, so parity is unaffected.
+MIN_DISTINCT_LOCATIONS = 3
 
 # RANSAC inlier tolerance in pixels (perpendicular distance). 4K frames + a
 # 3 px laser blob → ~4 px is a generous-but-not-loose tolerance for label
@@ -178,7 +189,14 @@ def _line_confidence(xy: np.ndarray, a: float, b: float) -> float:
     A high ratio means the points are spread out along the line (well-determined
     direction). A low ratio means they cluster, leaving the line direction
     ambiguous.
+
+    Points on fewer than ``MIN_DISTINCT_LOCATIONS`` distinct locations score
+    0. Their perpendicular variance is exactly 0, which the ratio would read
+    as a perfect line (``inf``); but one location fixes no direction and two
+    fix it with no redundancy.
     """
+    if np.unique(xy, axis=0).shape[0] < MIN_DISTINCT_LOCATIONS:
+        return 0.0
     centered = xy - xy.mean(axis=0)
     along = np.array([-b, a])
     perp = np.array([a, b])
