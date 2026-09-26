@@ -158,3 +158,62 @@ def test_three_stacked_collinear_locations_stay_confident():
     fit = fit_dive_line(xy, rng=np.random.default_rng(0))
     assert fit is not None
     assert fit.is_confident
+
+
+# ---------------------------------------------------------------------------
+# The calling contract (see ``flag_outliers``): one pass over the full
+# population, in a stable order. These pin both halves, so a change that
+# makes flagging idempotent or order-invariant has to revisit the docstrings.
+# ---------------------------------------------------------------------------
+
+
+def _stepped_dive() -> np.ndarray:
+    """200 labels on a line with 1 px noise, 8 gross mislabels 40-80 px off,
+    and frames 80-129 stepped 5 px to one side — the dot's line moving for a
+    stretch of the dive, as in prod dive 257."""
+    rng = np.random.default_rng(0)
+    n = 200
+    xs = np.linspace(0.0, 1500.0, n)
+    perp = rng.normal(0.0, 1.0, n)
+    perp[80:130] += 5.0
+    bad = rng.choice(n, 8, replace=False)
+    perp[bad] += rng.choice([-1, 1], 8) * rng.uniform(40.0, 80.0, 8)
+    normal = np.array([-0.3, 1.0]) / np.hypot(0.3, 1.0)
+    return np.column_stack([xs, 0.3 * xs + 400.0]) + perp[:, None] * normal
+
+
+def _fit_and_flag(xy: np.ndarray) -> np.ndarray:
+    fit = fit_dive_line(xy)
+    assert fit is not None
+    return flag_outliers(xy, fit)
+
+
+def test_refitting_the_full_population_reproduces_its_flags():
+    """What the contract promises: a caller that re-fits every row each run,
+    flagged ones included and in the same order, gets the same flags."""
+    xy = _stepped_dive()
+    first = _fit_and_flag(xy)
+    assert first.any()
+    np.testing.assert_array_equal(_fit_and_flag(xy.copy()), first)
+
+
+def test_reflagging_the_survivors_flags_more():
+    """What the contract forbids, and why: each pass over the survivors
+    estimates a smaller noise scale and flags more, eroding the step."""
+    xy = _stepped_dive()
+    survivors = xy[~_fit_and_flag(xy)]
+    assert fit_dive_line(survivors).label_noise_mad < fit_dive_line(xy).label_noise_mad
+    assert _fit_and_flag(survivors).any()
+
+
+def test_row_order_can_change_the_flags():
+    """Why the contract says "in the same order": RANSAC samples by index."""
+    xy = _stepped_dive()
+    flags = _fit_and_flag(xy)
+    changed = False
+    for seed in range(20):
+        perm = np.random.default_rng(seed).permutation(len(xy))
+        if not np.array_equal(_fit_and_flag(xy[perm])[np.argsort(perm)], flags):
+            changed = True
+            break
+    assert changed

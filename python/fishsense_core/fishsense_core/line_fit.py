@@ -103,7 +103,17 @@ COARSE_CALIBRATION_TOLERANCE_PX = 20.0
 
 @dataclass
 class LineFit:  # pylint: disable=too-many-instance-attributes
-    """A normalized line ``a*x + b*y + c = 0`` plus quality metrics."""
+    """A normalized line ``a*x + b*y + c = 0`` plus quality metrics.
+
+    ``label_noise_mad`` is ``1.4826 * MAD`` of the signed perpendicular
+    residuals of *every* row passed to :func:`fit_dive_line`, in px — the
+    noise scale :func:`flag_outliers` thresholds against. It is a property of
+    the population it was estimated from, not of the camera or the dive:
+    drop rows and it shrinks. Removing the rows a previous
+    :func:`flag_outliers` call flagged cuts the residual tail, so a fit of the
+    survivors reports a smaller value and flags rows the first call passed.
+    See :func:`flag_outliers` for the calling contract that follows.
+    """
 
     a: float
     b: float
@@ -218,6 +228,11 @@ def fit_dive_line(  # pylint: disable=too-many-locals
 
     Returns ``None`` when fewer than ``MIN_POINTS_FOR_LINE`` positives are
     available — RANSAC on 2-4 points is degenerate.
+
+    Deterministic for identical input, but not order-invariant: RANSAC draws
+    its point pairs by row index from ``rng``, so the same labels in another
+    order, or with one label added, can settle on a different line. Pass a
+    dive's labels in a stable order (e.g. by image id).
     """
     if xy.shape[0] < MIN_POINTS_FOR_LINE:
         return None
@@ -285,6 +300,23 @@ def flag_outliers(  # pylint: disable=too-many-arguments
     sits a few px off it; see `COARSE_CALIBRATION_TOLERANCE_PX`. Omit it and
     every row is judged at 3 sigma, which is what every caller got before
     this existed — the loose rule has to be asked for.
+
+    **Calling contract: one pass over the whole population.** This is a
+    single-pass judgement of the rows passed in, against a noise scale
+    (``fit.label_noise_mad``) estimated from those same rows. It is *not*
+    idempotent over its own survivors: fit and flag, drop what was flagged,
+    refit and flag again, and more rows can be flagged — and again, pass after
+    pass. Dropping the flagged tail shrinks the next noise estimate, so the
+    3-sigma cut moves inward. Callers that act on the flags (e.g. superseding
+    labels) must therefore fit and flag the **full** population every time —
+    rows flagged on earlier runs included, in the same order (see
+    :func:`fit_dive_line`) — and never re-flag the survivors of an earlier
+    pass.
+
+    Idempotence is deliberately not provided. An idempotent rule must flag
+    its own fixed point in one call, and on dives whose line drifts or steps
+    during the dive, that fixed point is the eroded set: labels that one line
+    cannot represent, not mislabels.
     """
     if not fit.is_confident:
         return np.zeros(xy.shape[0], dtype=bool)
