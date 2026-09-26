@@ -42,6 +42,10 @@ python/fishsense_core/
                                    #   Numbers pinned by test_line_fit_golden.py to v2's
                                    #   dive_laser_lines rows (fishsense-lite's copy), except
                                    #   label_noise_mad: lite's was ~0.59 sigma, fixed here
+    camera_intrinsics.py           # CameraIntrinsics (K + distortion), exported at the
+                                   #   package root. Consumers duck-type on its two
+                                   #   attributes; nothing may import fishsense_api_sdk
+                                   #   (tests/test_no_api_sdk.py)
     image/image.py                 # Abstract Image base class
     image/decode.py                # DecodeConfig + the decode chain as functions;
                                    #   default is auto-gamma -> global CIELAB L*

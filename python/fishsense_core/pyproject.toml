@@ -41,12 +41,11 @@ laser-detector = [
     "segmentation-models-pytorch>=0.4",
     "huggingface-hub>=0.26",
 ]
-# RectifiedImage (whole-image undistortion) needs the API SDK's CameraIntrinsics
-# model. The SDK is git-only, so keeping it out of the base deps is what makes
-# the published wheel `pip install`-able at all — a bare `fishsense-api-sdk` in
-# Requires-Dist has no locator and pip cannot resolve it. The laser detector
-# and its own output rectification (raw cv2.undistortPoints) do NOT need it.
-rectified = ["fishsense-api-sdk"]
+# Empty, kept so `pip install 'fishsense_core[rectified]'` still resolves. It
+# used to pull the API SDK for its CameraIntrinsics; RectifiedImage now takes
+# fishsense_core.CameraIntrinsics (or any object with the same two attributes),
+# so nothing in the core needs the SDK.
+rectified = []
 # BM3D denoising (fishsense_core.image.denoise). Kept out of the base install
 # because nothing enables it: it costs 15-36x the entire decode (133.8 s per
 # 12-megapixel frame at the "np" profile, 56.8 s at "lc", against 3.7 s for the
@@ -64,9 +63,6 @@ slate = [
     "huggingface-hub>=0.26",
 ]
 
-[tool.uv.sources]
-fishsense-api-sdk = { git = "https://github.com/UCSD-E4E/fishsense-api-sdk.git" }
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
@@ -77,11 +73,7 @@ dev = [
     "pytest>=9.0.3",
     "pytest-cov>=6.0.0",
     "pytest-timeout>=2.3.1",
-    # Not a base dependency (see [project.optional-dependencies].rectified), but
-    # the test suite covers RectifiedImage, so the dev/CI env needs it. Resolved
-    # from git via [tool.uv.sources].
-    "fishsense-api-sdk",
-    # Likewise for the denoise extra: opt-in for users, but the tests cover it,
-    # and a dependency nobody's CI installs is a dependency nobody's CI checks.
+    # The denoise extra is opt-in for users, but the tests cover it, and a
+    # dependency nobody's CI installs is a dependency nobody's CI checks.
     "bm3d>=4.0",
 ]

@@ -1056,8 +1056,9 @@ def rectify(
     and the JPEG are all one coordinate system.
 
     Takes plain arrays rather than a ``CameraIntrinsics``, so it is usable
-    without the API SDK — which is an optional extra, see
-    :class:`~fishsense_core.image.rectified_image.RectifiedImage`.
+    with no intrinsics object at all; see
+    :class:`~fishsense_core.image.rectified_image.RectifiedImage` for the
+    object-taking form.
     """
     return cv2.undistort(
         image,

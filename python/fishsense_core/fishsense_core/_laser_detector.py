@@ -42,9 +42,10 @@ from typing import TYPE_CHECKING, Any
 import cv2
 import numpy as np
 
+from fishsense_core.camera_intrinsics import CameraIntrinsics
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import torch
-    from fishsense_api_sdk.models.camera_intrinsics import CameraIntrinsics
 
 _log = logging.getLogger(__name__)
 
@@ -379,18 +380,16 @@ def _intrinsics_arrays(intrinsics: "CameraIntrinsics") -> tuple[np.ndarray, np.n
     """Read ``(camera_matrix, distortion_coefficients)`` off an intrinsics object.
 
     Mirrors how :class:`~fishsense_core.image.rectified_image.RectifiedImage`
-    consumes ``CameraIntrinsics`` — plain attribute access, no SDK call — so the
-    laser core needs no runtime import of the git-only SDK and the wheel stays
-    ``pip install``-able. Anything exposing those two attributes works; the SDK's
-    ``CameraIntrinsics`` (the ``[rectified]`` extra) is the intended source.
+    consumes intrinsics — plain attribute access. :class:`CameraIntrinsics` is
+    the core's own type; anything exposing those two attributes also works, so
+    the API SDK's ``CameraIntrinsics`` is accepted but not required.
     """
     try:
         return intrinsics.camera_matrix, intrinsics.distortion_coefficients
     except AttributeError as exc:
         raise TypeError(
             "camera intrinsics must expose `camera_matrix` and "
-            "`distortion_coefficients` (e.g. fishsense_api_sdk's CameraIntrinsics "
-            "from the `rectified` extra); "
+            "`distortion_coefficients` (e.g. fishsense_core.CameraIntrinsics); "
             f"got {type(intrinsics).__name__}"
         ) from exc
 
@@ -404,7 +403,7 @@ def _resolve_rectify_intrinsics(
     """Pick the ``(K, dist)`` for output rectification.
 
     Exactly one source must be given: a registered ``camera_id`` (fleet path) or
-    an explicit ``camera_matrix`` + ``distortion`` (one-off / SDK-free path).
+    an explicit ``camera_matrix`` + ``distortion`` (one-off path).
     Kept module-level and torch-free so the resolution rules are unit-testable
     without loading a model.
     """
@@ -636,10 +635,11 @@ class LaserDetector:
     ) -> None:
         """Register a camera's intrinsics for ``predict(camera_id=...)``.
 
-        ``intrinsics`` is a ``CameraIntrinsics`` from ``fishsense_api_sdk`` (the
-        ``rectified`` extra), or any object exposing ``camera_matrix`` and
-        ``distortion_coefficients``. Needed only for a fleet doing 3D
-        reconstruction, where each camera has its own calibration.
+        ``intrinsics`` is a :class:`~fishsense_core.CameraIntrinsics`, or any
+        object exposing ``camera_matrix`` and ``distortion_coefficients`` — the
+        API SDK's ``CameraIntrinsics`` is accepted but not required. Needed
+        only for a fleet doing 3D reconstruction, where each camera has its own
+        calibration.
         """
         self.camera_intrinsics[camera_id] = intrinsics
 

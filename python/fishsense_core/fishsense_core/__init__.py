@@ -5,6 +5,10 @@ import os
 import sys
 from glob import glob
 
+from fishsense_core.camera_intrinsics import CameraIntrinsics
+
+__all__ = ["CameraIntrinsics"]
+
 __version__ = "0.1.0"
 
 
