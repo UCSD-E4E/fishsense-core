@@ -7,16 +7,14 @@ what changed is the seam: the kernel takes a decoded frame and returns a
 :class:`FishAtDot` with a dot *index*, where the service took JPEG bytes and
 returned its own row with a laser label id.
 
-Everything but the SAM 3.1 adapter's autocast tests runs without torch, a
-GPU or a model, which is the point: these are the parts that fail *plausibly*.
-A bad crop origin displaces every keypoint by a constant and still looks like
-a fish.
+Everything but the SAM 3.1 adapter's autocast tests runs without torch or a
+GPU (the module lives under ``fishsense_core.fish``, so ``_native`` is always
+present), which is the point: these are the parts that fail *plausibly*. A
+bad crop origin displaces every keypoint by a constant and still looks like a
+fish.
 """
 
 from __future__ import annotations
-
-import sys
-import types
 
 import cv2
 import numpy as np
@@ -29,6 +27,7 @@ from fishsense_core.fish.fish_at_dot import (
     FishialSegmenter,
     Sam3Segmenter,
     crop_origin,
+    cut_by_window,
     find_fish_at_dot,
     lift_point,
     mask_at_point,
@@ -147,11 +146,48 @@ def test_silhouette_ratio_is_none_for_a_degenerate_length():
 def test_mask_box_is_half_open_and_lifted():
     m = np.zeros((20, 30), dtype=np.uint8)
     m[3:8, 10:14] = 1
-    assert mask_box(m, 100, 200) == [110, 203, 114, 208]
+    assert mask_box(m, 100, 200) == (110, 203, 114, 208)
 
 
 def test_mask_box_of_an_empty_mask_is_none():
     assert mask_box(np.zeros((4, 4), dtype=np.uint8), 0, 0) is None
+
+
+class TestCutByWindow:
+    """A mask touching an edge of the window that is not the frame's own was
+    cut by the window; one touching an edge the window was clamped to was
+    cut by the photo, which no bigger window can see past."""
+
+    def _mask(self, **edges):
+        m = np.zeros((CROP_H, CROP_W), dtype=np.uint8)
+        m[600:700, 800:1000] = 1
+        if edges.get("left"):
+            m[650, 0] = 1
+        if edges.get("right"):
+            m[650, -1] = 1
+        if edges.get("top"):
+            m[0, 900] = 1
+        if edges.get("bottom"):
+            m[-1, 900] = 1
+        return m
+
+    def test_an_interior_mask_is_not_cut(self):
+        assert cut_by_window(self._mask(), 1100, 800, FRAME_W, FRAME_H) is False
+
+    @pytest.mark.parametrize("edge", ["left", "right", "top", "bottom"])
+    def test_touching_an_interior_window_edge_is_cut(self, edge):
+        assert cut_by_window(self._mask(**{edge: True}), 1100, 800, FRAME_W, FRAME_H) is True
+
+    def test_touching_the_frames_own_edge_is_not_cut(self):
+        # Window clamped to the top-left corner: its left and top edges are
+        # the photo's.
+        assert cut_by_window(self._mask(left=True, top=True), 0, 0, FRAME_W, FRAME_H) is False
+        # Clamped to the bottom-right corner likewise.
+        ox, oy = FRAME_W - CROP_W, FRAME_H - CROP_H
+        assert cut_by_window(self._mask(right=True, bottom=True), ox, oy, FRAME_W, FRAME_H) is False
+
+    def test_a_clamped_window_is_still_cut_on_its_free_edges(self):
+        assert cut_by_window(self._mask(right=True), 0, 0, FRAME_W, FRAME_H) is True
 
 
 # ── the kernel ──────────────────────────────────────────────────────────────
@@ -329,6 +365,35 @@ def test_a_smaller_window_is_honoured():
     assert stub.seen_shape == (700, 900)
 
 
+def test_dots_may_be_an_array():
+    """The laser detector and the line fit hand over (N, 2) arrays; an array
+    has no truth value, so the empty check must not ask for one."""
+    laser = np.array([[2000.0, 1500.0], [2100.0, 1500.0]])
+    ox, oy = crop_origin(laser[0, 0], laser[0, 1], FRAME_W, FRAME_H, CROP_W, CROP_H)
+    stub = _Stub([_fish_mask(int(laser[0, 0] - ox), int(laser[0, 1] - oy))])
+
+    result = _find(_frame(), laser, stub)
+
+    assert (result.status, result.dot) == ("predicted", 0)
+    assert _find(_frame(), np.zeros((0, 2)), _Stub([])).status == "laser_off_all_fish"
+
+
+def test_results_with_masks_compare_and_hash():
+    """The result is a frozen dataclass; the mask has no truth value, so it
+    sits out of equality and hashing or both would raise."""
+    laser = (2000.0, 1500.0)
+    ox, oy = crop_origin(*laser, FRAME_W, FRAME_H, CROP_W, CROP_H)
+    mask = _fish_mask(int(laser[0] - ox), int(laser[1] - oy))
+
+    a = _find(_frame(), [laser], _Stub([mask]))
+    b = _find(_frame(), [laser], _Stub([mask.copy()]))
+
+    assert a == b
+    assert hash(a) == hash(b)
+    assert len({a, b}) == 1
+    assert a.mask is not None
+
+
 class TestAnAbstentionNamesItsDot:
     """v1 left the dot NULL on every abstention, so a laser correction never
     made one stale: the frame kept its "no fish" forever. A kept mask names
@@ -370,7 +435,7 @@ class TestTheKeptMasksBox:
         mask = np.zeros((CROP_H, CROP_W), dtype=np.uint8)
         local_x, local_y = int(self.LASER[0] - ox), int(self.LASER[1] - oy)
         mask[local_y - 40 : local_y + 30, local_x - 200 : local_x + 150] = 1
-        box = [local_x - 200 + ox, local_y - 40 + oy, local_x + 150 + ox, local_y + 30 + oy]
+        box = (local_x - 200 + ox, local_y - 40 + oy, local_x + 150 + ox, local_y + 30 + oy)
         return mask, box
 
     def test_a_prediction_carries_its_masks_box_in_frame_pixels(self):
@@ -411,7 +476,6 @@ def test_the_real_detector_is_the_default():
     """With no detector passed, the stage runs fishsense-core's own
     FishHeadTailDetector on the kept mask: the SAM rule as production
     computes it."""
-    pytest.importorskip("fishsense_core._native")
     laser = (2000.0, 1500.0)
     ox, oy = crop_origin(*laser, FRAME_W, FRAME_H, CROP_W, CROP_H)
     mask = _fish_mask(int(laser[0] - ox), int(laser[1] - oy))
@@ -421,6 +485,122 @@ def test_the_real_detector_is_the_default():
     assert result.status == "predicted"
     assert abs(result.head[0] - result.tail[0]) == pytest.approx(400, abs=40)
     assert result.head[1] == pytest.approx(laser[1], abs=70)
+
+
+# ── a fish longer than the window ───────────────────────────────────────────
+#
+# The window is 1800x1350 around the dot; a fish longer than it came back cut
+# by the window's straight edges, and its head and tail were read off the cut
+# (lab mission 383, 2026-10-22: a 686 mm Nassau Grouper measured 554 mm). With
+# grow_cut_masks, a mask touching an edge of the window that is not the frame's
+# own is segmented again on the whole frame. Ported from fishsense-services'
+# tests/test_automatic_frames.py.
+
+DOT = (2000.0, 1500.0)
+
+
+def _fish_in_frame(cx, cy, half_len, half_h=150):
+    m = np.zeros((FRAME_H, FRAME_W), np.uint8)
+    cv2.ellipse(m, (int(cx), int(cy)), (half_len, half_h), 0, 0, 360, 1, -1)
+    return m
+
+
+def _window_of(frame_mask, dot=DOT):
+    ox, oy = crop_origin(*dot, FRAME_W, FRAME_H, CROP_W, CROP_H)
+    return np.ascontiguousarray(frame_mask[oy : oy + CROP_H, ox : ox + CROP_W])
+
+
+class _Windowed:
+    """A segmenter that answers the window and the whole frame each with
+    their own masks, as SAM would see them."""
+
+    def __init__(self, window, frame):
+        self.answers = {(CROP_H, CROP_W): window, (FRAME_H, FRAME_W): frame}
+        self.shapes = []
+
+    def segment(self, image):
+        self.shapes.append(image.shape[:2])
+        return self.answers[image.shape[:2]]
+
+
+LONG_FISH = _fish_in_frame(*DOT, half_len=1300)
+
+
+class TestGrowCutMasks:
+    def test_a_fish_longer_than_the_window_is_measured_on_the_whole_frame(self):
+        seg = _Windowed([_window_of(LONG_FISH)], [LONG_FISH])
+
+        r = _find(_frame(), [DOT], seg, grow_cut_masks=True)
+
+        assert seg.shapes == [(CROP_H, CROP_W), (FRAME_H, FRAME_W)]
+        assert r.status == "predicted"
+        assert (r.crop_x, r.crop_y) == (0, 0)
+        assert r.mask_bbox[0] <= DOT[0] - 1290 and r.mask_bbox[2] >= DOT[0] + 1290
+        ends = sorted((r.head[0], r.tail[0]))
+        assert ends[0] == pytest.approx(DOT[0] - 1300, abs=30)
+        assert ends[1] == pytest.approx(DOT[0] + 1300, abs=30)
+        assert r.mask.shape == (FRAME_H, FRAME_W), "the whole frame's mask, at (0, 0)"
+
+    def test_off_by_default_the_cut_mask_is_kept(self):
+        """The human pre-fill path's output is pinned: without the flag the
+        window's answer stands, cut or not."""
+        seg = _Windowed([_window_of(LONG_FISH)], [LONG_FISH])
+
+        r = _find(_frame(), [DOT], seg)
+
+        assert seg.shapes == [(CROP_H, CROP_W)]
+        assert r.status == "predicted"
+        assert (r.crop_x, r.crop_y) == crop_origin(*DOT, FRAME_W, FRAME_H, CROP_W, CROP_H)
+        assert r.length_px < CROP_W
+
+    def test_a_fish_inside_the_window_is_segmented_once(self):
+        fish = _fish_in_frame(*DOT, half_len=500)
+        seg = _Windowed([_window_of(fish)], [])
+
+        r = _find(_frame(), [DOT], seg, grow_cut_masks=True)
+
+        assert seg.shapes == [(CROP_H, CROP_W)]
+        assert r.status == "predicted"
+        assert (r.crop_x, r.crop_y) == crop_origin(*DOT, FRAME_W, FRAME_H, CROP_W, CROP_H)
+
+    def test_a_mask_cut_only_by_the_frames_own_edge_is_not_segmented_again(self):
+        """Near the frame's edge the window is clamped there: a fish running
+        off the photo is cut by the photo, which a bigger window cannot help."""
+        dot = (300.0, 1500.0)
+        fish = _fish_in_frame(150, 1500, half_len=600)  # runs off the left edge
+        seg = _Windowed([_window_of(fish, dot)], [])
+
+        r = _find(_frame(), [dot], seg, grow_cut_masks=True)
+
+        assert seg.shapes == [(CROP_H, CROP_W)]
+        assert r.status == "predicted" and r.crop_x == 0
+
+    def test_a_cut_fish_the_whole_frame_puts_no_mask_under_the_dot_abstains(self):
+        """The cut mask's length is known to be wrong, so it is never kept."""
+        elsewhere = _fish_in_frame(DOT[0] + 1500, 400, half_len=300)
+        seg = _Windowed([_window_of(LONG_FISH)], [elsewhere])
+
+        r = _find(_frame(), [DOT], seg, grow_cut_masks=True)
+
+        assert (r.status, r.dot) == ("laser_off_all_fish", 0)
+        assert r.head is None and r.mask is None and (r.crop_x, r.crop_y) == (0, 0)
+
+    def test_a_cut_fish_the_whole_frame_finds_nothing_on_is_no_detection(self):
+        seg = _Windowed([_window_of(LONG_FISH)], [])
+
+        r = _find(_frame(), [DOT], seg, grow_cut_masks=True)
+
+        assert (r.status, r.crop_x, r.crop_y) == ("no_detections", 0, 0)
+
+    def test_the_second_pass_names_the_dot_on_the_whole_frame_mask(self):
+        miss = (DOT[0], 2100.0)  # below the fish; its window still holds DOT
+        seg = _Windowed([_window_of(LONG_FISH, miss)], [LONG_FISH])
+        # The window at `miss` catches the fish's lower part, cut at its top.
+        assert _window_of(LONG_FISH, miss)[0].any()
+
+        r = _find(_frame(), [miss, DOT], seg, grow_cut_masks=True)
+
+        assert (r.status, r.dot) == ("predicted", 1)
 
 
 # ── mask conversion ─────────────────────────────────────────────────────────
@@ -494,20 +674,20 @@ class TestFishialSegmenter:
 
         assert np.array_equal(recorder.seen, frame), "frame was converted"
 
-    def test_a_non_landscape_crop_is_refused_rather_than_silently_empty(self):
-        recorder = self._Recording(np.ones((40, 20), dtype=np.int32))
+    @pytest.mark.parametrize("shape", [(40, 20, 3), (30, 30, 3)], ids=["portrait", "square"])
+    def test_a_portrait_or_square_crop_goes_to_the_model_as_is(self, shape):
+        """The service's copy refused these, from a time when the native
+        ``inference`` returned an all-zero mask for them. It now rotates a
+        portrait image in and its mask back out, and takes a square one
+        natively, so the guard would only lose fish."""
+        labels = np.zeros(shape[:2], dtype=np.int32)
+        labels[5:10, 5:10] = 1
+        recorder = self._Recording(labels)
 
-        masks = FishialSegmenter(recorder).segment(np.zeros((40, 20, 3), dtype=np.uint8))
+        masks = FishialSegmenter(recorder).segment(np.zeros(shape, dtype=np.uint8))
 
-        assert masks == []
-        assert recorder.seen is None, "the model should not have been called"
-
-    def test_a_square_crop_is_refused_too(self):
-        """`width <= height`: a square is not landscape either."""
-        recorder = self._Recording(np.ones((30, 30), dtype=np.int32))
-
-        assert FishialSegmenter(recorder).segment(np.zeros((30, 30, 3), np.uint8)) == []
-        assert recorder.seen is None
+        assert recorder.seen is not None and recorder.seen.shape == shape
+        assert len(masks) == 1 and int(masks[0].sum()) == 25
 
     def test_load_calls_load_model_before_the_segmenter_is_published(self, monkeypatch):
         """Unloaded, `inference` raises on every frame."""
@@ -525,11 +705,7 @@ class TestFishialSegmenter:
                 return np.zeros((4, 8), dtype=np.int32)
 
         built = _Segmentation()
-        monkeypatch.setitem(
-            sys.modules,
-            "fishsense_core.fish",
-            types.SimpleNamespace(FishSegmentation=lambda: built),
-        )
+        monkeypatch.setattr(sut, "FishSegmentation", lambda: built)
 
         got = FishialSegmenter.load()
 
@@ -626,17 +802,49 @@ class TestSam3Segmenter:
         self._segment(self._processor())
         assert self.torch.is_autocast_enabled(self._device_type()) is False
 
-    def test_masks_are_squeezed_numpy(self):
+    @staticmethod
+    def _processor_returning(masks):
         class _Processor:
             def set_image(self, _image):
                 return {}
 
             def set_text_prompt(self, _prompt, state):
-                state["masks"] = [self.torch_mask()]
+                state["masks"] = masks
                 return state
 
-            def torch_mask(self):
-                return sut.np.zeros((1, 5, 7))  # a (1, H, W) array, as SAM returns
+        return _Processor()
 
-        masks = Sam3Segmenter(_Processor()).segment(np.zeros((5, 7, 3), dtype=np.uint8))
-        assert len(masks) == 1 and masks[0].shape == (5, 7)
+    def test_masks_are_squeezed_numpy(self):
+        masks = [np.zeros((1, 5, 7))]  # a list of (1, H, W), as SAM returns
+        got = Sam3Segmenter(self._processor_returning(masks)).segment(
+            np.zeros((5, 7, 3), dtype=np.uint8)
+        )
+        assert len(got) == 1 and got[0].shape == (5, 7)
+
+    def test_a_batch_tensor_crosses_to_the_host_once(self):
+        """SAM hands back one (N, 1, H, W) device tensor; moving it per
+        instance is N syncs and N transfers on the per-frame hot path."""
+
+        class _Batch:
+            """A stand-in device tensor: iterable only once on the host."""
+
+            def __init__(self, data):
+                self._data = data
+                self.transfers = 0
+
+            def detach(self):
+                return self
+
+            def cpu(self):
+                self.transfers += 1
+                return self._data
+
+            def __iter__(self):
+                raise AssertionError("iterated on the device")
+
+        batch = _Batch(np.ones((3, 1, 5, 7)))
+        got = Sam3Segmenter(self._processor_returning(batch)).segment(
+            np.zeros((5, 7, 3), dtype=np.uint8)
+        )
+        assert batch.transfers == 1
+        assert len(got) == 3 and all(m.shape == (5, 7) for m in got)

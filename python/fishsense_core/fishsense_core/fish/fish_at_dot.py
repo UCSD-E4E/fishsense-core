@@ -9,7 +9,7 @@ keypoint experiment (``UCSD-E4E/2026-10-22_headtail_keypoints``), each
 importing the previous one's private names to be sure of seeing *the same
 fish*. Ported from fishsense-services' ``headtail_predict/predict.py`` and
 ``geometry.py`` (themselves ported from fishsense-lite@77e8f8e5); behaviour
-is unchanged and three of its choices are measured:
+is unchanged and its choices are measured:
 
 * **crop, don't tile**: one :data:`CROP_WIDTH` x :data:`CROP_HEIGHT` window
   centred on the *first* laser dot, clamped inside the frame (never padded
@@ -18,7 +18,14 @@ is unchanged and three of its choices are measured:
   seam, with the embedded Mask R-CNN (:class:`FishSegmentation`) as the
   no-GPU fallback;
 * the head and tail are fishsense-core's own :class:`FishHeadTailDetector`
-  on the kept mask (the "SAM rule"), lifted back into frame pixels.
+  on the kept mask (the "SAM rule"), lifted back into frame pixels;
+* **a fish longer than the window** (``grow_cut_masks=True``, the automatic
+  chain's since 2026-10-22): a kept mask that runs into an edge of the window
+  that is not the frame's own is segmented again on the whole frame, because
+  the cut mask's ends, and the head and tail read off them, are the window's
+  (lab mission 383: a 686 mm grouper cut at both ends measured 554 mm). The
+  cut mask is never kept: the whole frame answers, or the frame abstains.
+  Off by default, as for the human pre-fill path, whose output is pinned.
 
 What this module does **not** do is the service's job and stays there: decode
 the JPEG, map a status to a database row, name a laser *label* (a caller gets
@@ -30,30 +37,30 @@ no autocast; without one every frame dies in ``vitdet.forward`` with a dtype
 mismatch, which in production looped on all 356 images of dive 94 on
 2026-09-08), on a PIL image (an HWC array yields three-pixel-wide masks);
 tensors are detached and moved to the CPU before numpy; the Mask R-CNN
-fallback is fed BGR, landscape crops only, and its instance map is split into
-binary masks.
+fallback is fed BGR and its instance map is split into binary masks.
 
-The geometry (:func:`crop_origin`, :func:`lift_point`, :func:`mask_at_point`,
-:func:`mask_box`, :func:`silhouette_ratio`) is kept as separate functions
-because these are the parts that fail *plausibly*: a wrong crop origin
-displaces every keypoint by a constant and still produces a fish-shaped
-answer.
+The geometry (:func:`crop_origin`, :func:`cut_by_window`, :func:`lift_point`,
+:func:`mask_at_point`, :func:`mask_box`, :func:`silhouette_ratio`) is kept as
+separate functions because these are the parts that fail *plausibly*: a wrong
+crop origin displaces every keypoint by a constant and still produces a
+fish-shaped answer.
 """
 
 from __future__ import annotations
 
 # The geometry signatures and the result are the ported module's, kept
 # argument-for-argument so the service's call sites and tests read across; the
-# kernel's locals are the stage's steps. cv2 is a C extension pylint cannot
-# introspect (no-member); torch, PIL and sam3 load lazily by design.
+# kernel's locals are the stage's steps.
 # pylint: disable=too-many-arguments,too-many-positional-arguments
-# pylint: disable=too-many-instance-attributes,too-many-locals,no-member
+# pylint: disable=too-many-instance-attributes,too-many-locals
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Iterable, List, Optional, Protocol, Sequence, Tuple
 
 import numpy as np
+
+from fishsense_core.fish import FishHeadTailDetector, FishSegmentation
 
 __all__ = [
     "CROP_HEIGHT",
@@ -68,6 +75,7 @@ __all__ = [
     "Sam3Segmenter",
     "Segmenter",
     "crop_origin",
+    "cut_by_window",
     "find_fish_at_dot",
     "lift_point",
     "mask_at_point",
@@ -119,10 +127,43 @@ def crop_origin(
     return ox, oy
 
 
+def cut_by_window(
+    binary: np.ndarray, origin_x: int, origin_y: int, frame_w: int, frame_h: int
+) -> bool:
+    """Whether a crop-local mask runs into an edge of the window that is not
+    the frame's own: the fish goes on past what the segmenter saw, so the
+    mask's ends, and the head and tail read off them, are the window's. An
+    edge the window was clamped to is the photo's, which no bigger window
+    can see past."""
+    h, w = binary.shape[:2]
+    return bool(
+        (origin_x > 0 and binary[:, 0].any())
+        or (origin_x + w < frame_w and binary[:, -1].any())
+        or (origin_y > 0 and binary[0, :].any())
+        or (origin_y + h < frame_h and binary[-1, :].any())
+    )
+
+
 def lift_point(point: Sequence[float], origin_x: int, origin_y: int) -> Tuple[float, float]:
     """Move a crop-local point back into rectified-frame coordinates, the
     space the laser labels and a labeller's clicks are in."""
     return (float(point[0]) + origin_x, float(point[1]) + origin_y)
+
+
+def _gate(
+    masks: Iterable[np.ndarray], points: Sequence[Sequence[float]]
+) -> Optional[Tuple[int, np.ndarray]]:
+    """The laser gate, once: ``(dot index, mask)`` for the first dot that
+    lands on any mask, trying dots in order and masks in order. None when
+    none does. :func:`mask_at_point` and the kernel both read this, so the
+    dot a result names is the one that chose its mask by construction."""
+    masks = list(masks)
+    for index, (px, py) in enumerate(points):
+        xi, yi = int(round(px)), int(round(py))
+        for mask in masks:
+            if 0 <= yi < mask.shape[0] and 0 <= xi < mask.shape[1] and mask[yi, xi]:
+                return index, mask
+    return None
 
 
 def mask_at_point(
@@ -131,22 +172,8 @@ def mask_at_point(
     """The laser gate: the first mask whose pixel at a laser dot is set. Every
     dot is tried, first hit wins. None (an abstention, not an error) when no
     dot lands on any mask."""
-    masks = list(masks)
-    for px, py in points:
-        xi, yi = int(round(px)), int(round(py))
-        for mask in masks:
-            if 0 <= yi < mask.shape[0] and 0 <= xi < mask.shape[1] and mask[yi, xi]:
-                return mask
-    return None
-
-
-def _dot_on_mask(points: Sequence[Sequence[float]], binary: np.ndarray) -> Optional[int]:
-    """Index of the first dot that lands on ``binary`` (crop-local), if any."""
-    for index, (px, py) in enumerate(points):
-        xi, yi = int(round(px)), int(round(py))
-        if 0 <= yi < binary.shape[0] and 0 <= xi < binary.shape[1] and binary[yi, xi]:
-            return index
-    return None
+    hit = _gate(masks, points)
+    return None if hit is None else hit[1]
 
 
 def silhouette_ratio(mask_area_px: int, length_px: float) -> Optional[float]:
@@ -158,27 +185,32 @@ def silhouette_ratio(mask_area_px: int, length_px: float) -> Optional[float]:
     return mask_area_px / (length_px * length_px)
 
 
-def mask_box(binary: np.ndarray, origin_x: int, origin_y: int) -> Optional[List[int]]:
-    """The mask's box, ``[x_min, y_min, x_max, y_max)``, lifted into frame
-    pixels like the keypoints. What a species or keypoint stage crops by.
-    None for an empty mask."""
+def mask_box(
+    binary: np.ndarray, origin_x: int, origin_y: int
+) -> Optional[Tuple[int, int, int, int]]:
+    """The mask's box, ``(x_min, y_min, x_max, y_max)``, half-open, lifted
+    into frame pixels like the keypoints. What a species or keypoint stage
+    crops by. None for an empty mask. A tuple, so a result that carries it
+    stays hashable."""
     ys, xs = np.nonzero(binary)
     if xs.size == 0:
         return None
-    return [
+    return (
         int(xs.min()) + origin_x,
         int(ys.min()) + origin_y,
         int(xs.max()) + 1 + origin_x,
         int(ys.max()) + 1 + origin_y,
-    ]
+    )
 
 
 # ── segmenters ──────────────────────────────────────────────────────────────
 
 
 class Segmenter(Protocol):  # pylint: disable=too-few-public-methods
-    """Anything that turns a BGR crop into crop-local binary masks. Production
-    passes :class:`Sam3Segmenter` or :class:`FishialSegmenter`; tests a stub."""
+    """Anything that turns a BGR image into image-local binary masks.
+    Production passes :class:`Sam3Segmenter` or :class:`FishialSegmenter`;
+    tests a stub. It is handed the window, and with ``grow_cut_masks`` the
+    whole frame too."""
 
     def segment(self, image_bgr: np.ndarray) -> List[np.ndarray]:
         """Instance masks of ``image_bgr``, each ``(H, W)`` and truthy on the
@@ -210,7 +242,9 @@ class Sam3Segmenter:  # pylint: disable=too-few-public-methods
         """One concept-prompted segmentation, under bfloat16 autocast entered
         as a context manager (the thread is reused), on a PIL image (an HWC
         array yields three-pixel-wide masks)."""
-        # pylint: disable=import-outside-toplevel,import-error
+        # cv2 is a C extension pylint cannot introspect; torch and PIL are the
+        # caller's and load on first use.
+        # pylint: disable=import-outside-toplevel,import-error,no-member
         import cv2
         import PIL.Image
         import torch
@@ -223,13 +257,17 @@ class Sam3Segmenter:  # pylint: disable=too-few-public-methods
         masks = state.get("masks") if hasattr(state, "get") else None
         if masks is None:
             return []
+        if getattr(masks, "detach", None) is not None:
+            # One (N, 1, H, W) tensor: one device-to-host transfer, not N.
+            masks = to_numpy(masks)
         return [to_numpy(m).squeeze() for m in masks]
 
 
 class FishialSegmenter:  # pylint: disable=too-few-public-methods
     """The embedded Mask R-CNN (:class:`fishsense_core.fish.FishSegmentation`)
     behind the :class:`Segmenter` seam: the fallback where there is no GPU.
-    BGR in, landscape crops only, its instance label map split into binary
+    BGR in, any orientation (the native ``inference`` rotates a portrait
+    image in and its mask back out), its instance label map split into binary
     masks."""
 
     def __init__(self, segmentation: Any):
@@ -240,25 +278,12 @@ class FishialSegmenter:  # pylint: disable=too-few-public-methods
         """Build and load the embedded model. ``load_model`` is called here,
         before the segmenter is handed out: unloaded, ``inference`` raises
         on every frame."""
-        # pylint: disable-next=import-outside-toplevel
-        from fishsense_core.fish import FishSegmentation
-
         segmentation = FishSegmentation()
         segmentation.load_model()
         return cls(segmentation)
 
     def segment(self, image_bgr: np.ndarray) -> List[np.ndarray]:
-        """Binary masks of each instance in a landscape BGR crop; ``[]`` for
-        a portrait or square one, which the model returns empty for anyway."""
-        height, width = image_bgr.shape[:2]
-        if width <= height:
-            _log.warning(
-                "fallback segmenter given a %dx%d (non-landscape) crop; "
-                "FishSegmentation returns an empty mask for these",
-                width,
-                height,
-            )
-            return []
+        """Binary masks of each instance in a BGR image."""
         labels = np.asarray(self._segmentation.inference(image_bgr))
         ids = [int(i) for i in np.unique(labels) if int(i) != 0]
         return [(labels == i) for i in ids]
@@ -270,7 +295,8 @@ class FishialSegmenter:  # pylint: disable=too-few-public-methods
 @dataclass(frozen=True)
 class FishAtDot:
     """What the stage found for one frame. Points and the box are in frame
-    pixels; the mask is crop-local (offset by ``(crop_x, crop_y)``)."""
+    pixels; the mask is local to ``(crop_x, crop_y)``, which is ``(0, 0)``
+    when the whole frame answered."""
 
     status: str
     width: int
@@ -283,9 +309,10 @@ class FishAtDot:
     #: caller that tracks laser *labels* uses it to name the one a later
     #: correction would make this result stale.
     dot: Optional[int] = None
-    #: The kept mask, ``(crop_h, crop_w)`` uint8 in {0, 1}; None when none was.
-    mask: Optional[np.ndarray] = None
-    mask_bbox: Optional[List[int]] = None
+    #: The kept mask, ``(h, w)`` uint8 in {0, 1}; None when none was. Left
+    #: out of equality and hashing: an array has no truth value.
+    mask: Optional[np.ndarray] = field(default=None, compare=False)
+    mask_bbox: Optional[Tuple[int, int, int, int]] = None
     mask_area_px: Optional[int] = None
     head: Optional[Tuple[float, float]] = None
     tail: Optional[Tuple[float, float]] = None
@@ -306,6 +333,7 @@ def find_fish_at_dot(
     *,
     crop_w: int = CROP_WIDTH,
     crop_h: int = CROP_HEIGHT,
+    grow_cut_masks: bool = False,
     head_tail_detector: Any = None,
 ) -> FishAtDot:
     """Crop, segment, gate, keypoint, and lift back to frame pixels.
@@ -313,11 +341,15 @@ def find_fish_at_dot(
     Args:
         frame_bgr: The rectified frame, ``(H, W, 3)`` uint8 BGR: the exact
             image the labeller is shown.
-        laser_points: Laser dots in frame pixels, ``[(x, y), ...]``. The crop
-            is centred on the first; every one is tried at the gate.
+        laser_points: Laser dots in frame pixels, ``[(x, y), ...]`` (a list
+            or an ``(N, 2)`` array). The crop is centred on the first; every
+            one is tried at the gate.
         segmenter: A :class:`Segmenter`.
         crop_w: Window size; the defaults are production's.
         crop_h: Window size; the defaults are production's.
+        grow_cut_masks: Segment the whole frame when the kept mask is cut by
+            the window (:func:`cut_by_window`). The automatic chain's; off for
+            the human pre-fill, whose output is pinned.
         head_tail_detector: Anything with ``find_head_tail_img(mask)``;
             defaults to :class:`fishsense_core.fish.FishHeadTailDetector`.
 
@@ -326,7 +358,7 @@ def find_fish_at_dot(
         decoded frame always yields a result.
     """
     height, width = frame_bgr.shape[:2]
-    if not laser_points:
+    if len(laser_points) == 0:
         return FishAtDot(STATUS_LASER_OFF_ALL_FISH, width, height, 0, 0)
 
     origin_x, origin_y = crop_origin(
@@ -343,16 +375,33 @@ def find_fish_at_dot(
         return FishAtDot(STATUS_NO_DETECTIONS, **placed)
 
     local_points = [(px - origin_x, py - origin_y) for px, py in laser_points]
-    mask = mask_at_point(masks, local_points)
-    if mask is None:
+    hit = _gate(masks, local_points)
+    if hit is None:
         return FishAtDot(STATUS_LASER_OFF_ALL_FISH, **placed)
+    dot, mask = hit
 
     binary = (np.asarray(mask) > 0).astype(np.uint8)
+    if grow_cut_masks and cut_by_window(binary, origin_x, origin_y, width, height):
+        # The fish runs on past the window. The cut mask's length is known to
+        # be wrong, so it is never kept: the whole frame answers, or the
+        # frame abstains.
+        origin_x = origin_y = 0
+        placed.update(crop_x=0, crop_y=0)
+        local_points = [(float(px), float(py)) for px, py in laser_points]
+        masks = segmenter.segment(np.ascontiguousarray(frame_bgr))
+        if not masks:
+            return FishAtDot(STATUS_NO_DETECTIONS, **placed)
+        hit = _gate(masks, local_points)
+        if hit is None:
+            return FishAtDot(STATUS_LASER_OFF_ALL_FISH, **placed)
+        dot, mask = hit
+        binary = (np.asarray(mask) > 0).astype(np.uint8)
+
     return _keypoint(
         binary,
         origin=(origin_x, origin_y),
         frame_size=(width, height),
-        local_points=local_points,
+        dot=dot,
         head_tail_detector=head_tail_detector,
     )
 
@@ -362,7 +411,7 @@ def _keypoint(
     *,
     origin: Tuple[int, int],
     frame_size: Tuple[int, int],
-    local_points: Sequence[Sequence[float]],
+    dot: int,
     head_tail_detector: Any,
 ) -> FishAtDot:
     """Keypoint one kept mask and lift the result into frame coordinates."""
@@ -373,7 +422,7 @@ def _keypoint(
         "height": frame_size[1],
         "crop_x": origin_x,
         "crop_y": origin_y,
-        "dot": _dot_on_mask(local_points, binary),
+        "dot": dot,
         "mask": binary,
         # The kept mask's box, on a failure too: the fish is known even when
         # its keypoints are not.
@@ -382,9 +431,6 @@ def _keypoint(
     }
 
     if head_tail_detector is None:
-        # pylint: disable-next=import-outside-toplevel
-        from fishsense_core.fish import FishHeadTailDetector
-
         head_tail_detector = FishHeadTailDetector()
     try:
         head, tail = head_tail_detector.find_head_tail_img(binary * 255)

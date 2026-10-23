@@ -47,7 +47,9 @@ python/fishsense_core/
     fish/fish_at_dot.py            # The head/tail stage: 1800x1350 window at the first
                                    #   laser dot -> Segmenter (Sam3Segmenter, or
                                    #   FishialSegmenter without a GPU) -> the mask a dot
-                                   #   lands on -> FishHeadTailDetector -> frame pixels.
+                                   #   lands on -> FishHeadTailDetector -> frame pixels;
+                                   #   grow_cut_masks=True re-segments the whole frame
+                                   #   when the window cut the fish (the automatic chain).
                                    #   Ported from fishsense-services' headtail_predict;
                                    #   the service keeps JPEG decode, rows and retries
     laser.py                       # calibrate_laser() wraps _native.laser.calibrate_laser;
