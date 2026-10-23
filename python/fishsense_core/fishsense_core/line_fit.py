@@ -29,11 +29,19 @@ Two surface differences from the research-repo module:
 * The polars helpers ``fit_lines_per_dive`` and ``flag_label_outliers``
   are dropped — the per-dive RANSAC / outlier kernel is the only piece
   the validation activity needs.
+
+The 2-D line search itself is public, parametrised, for other callers:
+`ransac_line` (random pairs; `fit_dive_line` is it at 4 px, 200 iterations,
+``default_rng(0)``) and `consensus_line` (every pair, for small
+populations), each refitting through the winning line's points with
+`fit_line_tls` or `fit_line_pca` and returning a `LineConsensus`.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import combinations
+from typing import Callable
 
 import numpy as np
 
@@ -137,10 +145,11 @@ class LineFit:  # pylint: disable=too-many-instance-attributes
         return np.abs(self.a * x + self.b * y + self.c)
 
 
-def _fit_line_total_least_squares(xy: np.ndarray) -> tuple[float, float, float]:
+def fit_line_tls(xy: np.ndarray) -> tuple[float, float, float]:
     """Fit a 2D line via SVD on centered points (total least squares).
 
-    Returns normalized ``(a, b, c)`` for ``a*x + b*y + c = 0``.
+    Returns normalized ``(a, b, c)`` for ``a*x + b*y + c = 0``. The default
+    ``refit`` of `ransac_line` and `consensus_line`.
     """
     centroid = xy.mean(axis=0)
     centered = xy - centroid
@@ -156,41 +165,235 @@ def _fit_line_total_least_squares(xy: np.ndarray) -> tuple[float, float, float]:
     return a, b, c
 
 
-def _ransac_line(  # pylint: disable=too-many-locals
+def fit_line_pca(xy: np.ndarray) -> tuple[float, float, float]:
+    """Total least squares by the other reading of the same SVD: the
+    principal direction ``u`` (first right singular vector) turned 90 degrees,
+    ``(a, b) = (-u_y, u_x)``, and ``c = -(a, b) . centroid``.
+
+    The same line as `fit_line_tls` to rounding, not bit for bit, and with no
+    sign convention (``u`` is whichever sign LAPACK returns). The default
+    ``refit`` of `consensus_line`.
+    """
+    centroid = xy.mean(axis=0)
+    u = np.linalg.svd(xy - centroid)[2][0]
+    normal = np.array([-u[1], u[0]])
+    return float(normal[0]), float(normal[1]), float(-normal @ centroid)
+
+
+# The private name this had before it was public; kept so nothing that
+# reached in for it breaks.
+_fit_line_total_least_squares = fit_line_tls
+
+#: A refit: inlier points in, a normalized ``(a, b, c)`` out.
+Refit = Callable[[np.ndarray], tuple[float, float, float]]
+
+
+@dataclass(frozen=True)
+class LineConsensus:
+    """What `ransac_line` and `consensus_line` return.
+
+    ``(a, b, c)`` is the refit through ``consensus``, normalized so that
+    ``|a*x + b*y + c|`` is the perpendicular distance in px. ``consensus`` is
+    the winning two-point line's inlier mask, the set the refit was made
+    from; ``inliers`` is the population re-scored against the refit, under the
+    same tolerance and comparison. They usually agree and need not: the refit
+    moves the line, so points near the tolerance can cross it either way.
+    """
+
+    a: float
+    b: float
+    c: float
+    inliers: np.ndarray
+    consensus: np.ndarray
+
+
+def _within(dist: np.ndarray, tol_px: float, inclusive: bool) -> np.ndarray:
+    return dist <= tol_px if inclusive else dist < tol_px
+
+
+def _pair_line(
+    xy: np.ndarray, i: int, j: int, min_separation_px: float
+) -> tuple[float, float, float] | None:
+    """The line through points ``i`` and ``j``, or None when they are closer
+    than ``min_separation_px`` (or coincide)."""
+    p0, p1 = xy[i], xy[j]
+    dx, dy = p1 - p0
+    norm = float(np.hypot(dx, dy))
+    if norm == 0.0 or norm < min_separation_px:
+        return None
+    a, b = -dy / norm, dx / norm
+    c = -(a * p0[0] + b * p0[1])
+    return a, b, c
+
+
+def _elementwise_distance(
+    xy: np.ndarray, line: tuple[float, float, float]
+) -> np.ndarray:
+    """``|a*x + b*y + c|``: `ransac_line`'s (and so `fit_dive_line`'s)."""
+    a, b, c = line
+    return np.abs(a * xy[:, 0] + b * xy[:, 1] + c)
+
+
+def _normalizing_distance(
+    xy: np.ndarray, line: tuple[float, float, float]
+) -> np.ndarray:
+    """``|xy @ (a, b) + c| / hypot(a, b)``: `consensus_line`'s."""
+    a, b, c = line
+    return np.abs(xy @ np.array([a, b]) + c) / np.hypot(a, b)
+
+
+def _refit(  # pylint: disable=too-many-arguments
     xy: np.ndarray,
+    consensus: np.ndarray,
+    *,
+    tol_px: float,
+    inclusive: bool,
+    refit: Refit,
+    distance: Callable[[np.ndarray, tuple[float, float, float]], np.ndarray],
+) -> LineConsensus:
+    a, b, c = refit(xy[consensus])
+    dist = distance(xy, (a, b, c))
+    return LineConsensus(
+        a=a,
+        b=b,
+        c=c,
+        inliers=_within(dist, tol_px, inclusive),
+        consensus=consensus,
+    )
+
+
+def ransac_line(  # pylint: disable=too-many-arguments
+    xy: np.ndarray,
+    *,
     tol_px: float,
     max_iters: int,
-    rng: np.random.Generator,
-) -> tuple[float, float, float, np.ndarray]:
-    """RANSAC line fit. Returns ``(a, b, c, inlier_mask)``."""
+    rng: np.random.Generator | int = 0,
+    inclusive: bool = False,
+    min_separation_px: float = 0.0,
+    refit: Refit = fit_line_tls,
+) -> LineConsensus | None:
+    """RANSAC line through 2-D points: the two-point line most points agree
+    with, refitted through the points that agree.
+
+    Each of ``max_iters`` iterations draws one pair with
+    ``rng.choice(n, size=2, replace=False)``, whether or not the pair is
+    used. A pair closer than ``min_separation_px`` (or coincident) is skipped.
+    The pair's line scores the points within ``tol_px`` of it (``<=`` when
+    ``inclusive``, else ``<``); a line replaces the best only with strictly
+    more points, so the first of equal counts wins. The best line's points
+    are refitted by ``refit`` and the population is re-scored against that.
+
+    ``rng`` is a Generator (consumed as above) or a seed for
+    ``np.random.default_rng``. The result depends on the population and its
+    order, not only the set: pass the full population in a stable order.
+
+    Returns None when no pair was usable or the best line has fewer than two
+    points (possible only for a ``tol_px`` near zero).
+
+    Distances are ``|a*x + b*y + c|``, `fit_dive_line`'s arithmetic, which
+    this keeps bit for bit: it uses ``tol_px=4``, ``max_iters=200``,
+    ``default_rng(0)``, strict, no minimum separation, `fit_line_tls`.
+
+    fishsense-services' ``shadow_calibration.gated._ransac_line`` is
+    ``tol_px=10``, ``max_iters=500``, ``default_rng(0)``, ``inclusive``,
+    ``min_separation_px=1``, `fit_line_pca`, returning ``consensus``. It
+    scores with ``|xy @ n - n @ p_i|``, equal to the above to rounding, so
+    the two can disagree on a dot within rounding of exactly ``tol_px``.
+    """
+    rng = np.random.default_rng(rng)
     n = xy.shape[0]
     best_inliers: np.ndarray | None = None
     best_count = -1
 
     for _ in range(max_iters):
         idx = rng.choice(n, size=2, replace=False)
-        p0, p1 = xy[idx[0]], xy[idx[1]]
-        dx, dy = p1 - p0
-        norm = float(np.hypot(dx, dy))
-        if norm == 0.0:
+        line = _pair_line(xy, idx[0], idx[1], min_separation_px)
+        if line is None:
             continue
-        a, b = -dy / norm, dx / norm
-        c = -(a * p0[0] + b * p0[1])
-        dist = np.abs(a * xy[:, 0] + b * xy[:, 1] + c)
-        inliers = dist < tol_px
+        inliers = _within(_elementwise_distance(xy, line), tol_px, inclusive)
         count = int(inliers.sum())
         if count > best_count:
             best_count = count
             best_inliers = inliers
 
     if best_inliers is None or best_count < 2:
-        a, b, c = _fit_line_total_least_squares(xy)
-        return a, b, c, np.ones(n, dtype=bool)
+        return None
+    return _refit(
+        xy,
+        best_inliers,
+        tol_px=tol_px,
+        inclusive=inclusive,
+        refit=refit,
+        distance=_elementwise_distance,
+    )
 
-    a, b, c = _fit_line_total_least_squares(xy[best_inliers])
-    dist = np.abs(a * xy[:, 0] + b * xy[:, 1] + c)
-    inliers = dist < tol_px
-    return a, b, c, inliers
+
+def consensus_line(  # pylint: disable=too-many-arguments
+    xy: np.ndarray,
+    *,
+    tol_px: float,
+    inclusive: bool = True,
+    min_separation_px: float = 1.0,
+    refit: Refit = fit_line_pca,
+) -> LineConsensus | None:
+    """Exhaustive-pairs consensus: every pair's line tried instead of a
+    random draw, for populations small enough to afford ``n**2 / 2`` lines.
+
+    Pairs ``(i, j)``, ``i < j``, are tried in ``itertools.combinations``
+    order; a pair closer than ``min_separation_px`` is skipped. A pair's line
+    is ``refit`` through the two points. A line replaces the best when more
+    points lie within ``tol_px`` of it (``<=`` when ``inclusive``), or as many
+    with a smaller summed distance among them; the first of exact ties wins.
+    The best line's points are refitted and the population re-scored, as in
+    `ransac_line`.
+
+    Distances here are ``|xy @ (a, b) + c| / hypot(a, b)``, not
+    `ransac_line`'s ``|a*x + b*y + c|``: equal to rounding, and the rounding
+    decides the tie-break when dots are stacked -- each candidate's summed
+    distance is then a sum of zeros-to-rounding. The defaults are
+    fishsense-services' ``automatic_calibration.v3.slate_consensus``
+    (10 px), which this reproduces bit for bit.
+
+    Returns None with fewer than two points, or when every pair is closer
+    than ``min_separation_px``: the points agree, on no direction.
+    """
+    n = xy.shape[0]
+    best_key: tuple[int, float] | None = None
+    best_inliers: np.ndarray | None = None
+    for i, j in combinations(range(n), 2):
+        if _pair_line(xy, i, j, min_separation_px) is None:
+            continue
+        dist = _normalizing_distance(xy, refit(xy[[i, j]]))
+        inliers = _within(dist, tol_px, inclusive)
+        key = (int(inliers.sum()), -float(dist[inliers].sum()))
+        if best_key is None or key > best_key:
+            best_key, best_inliers = key, inliers
+
+    if best_key is None or best_inliers is None or best_key[0] < 2:
+        return None
+    return _refit(
+        xy,
+        best_inliers,
+        tol_px=tol_px,
+        inclusive=inclusive,
+        refit=refit,
+        distance=_normalizing_distance,
+    )
+
+
+def _ransac_line(
+    xy: np.ndarray,
+    tol_px: float,
+    max_iters: int,
+    rng: np.random.Generator,
+) -> tuple[float, float, float, np.ndarray]:
+    """`fit_dive_line`'s RANSAC. Returns ``(a, b, c, inlier_mask)``; with no
+    usable line, the TLS fit through every point and an all-True mask."""
+    fit = ransac_line(xy, tol_px=tol_px, max_iters=max_iters, rng=rng)
+    if fit is None:
+        a, b, c = fit_line_tls(xy)
+        return a, b, c, np.ones(xy.shape[0], dtype=bool)
+    return fit.a, fit.b, fit.c, fit.inliers
 
 
 def _line_confidence(xy: np.ndarray, a: float, b: float) -> float:
