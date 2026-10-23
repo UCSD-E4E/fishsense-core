@@ -22,14 +22,53 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
-      release_created: ${{ steps.release.outputs['rust/fishsense-core--release_created'] }}
-      tag_name: ${{ steps.release.outputs['rust/fishsense-core--tag_name'] }}
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
       - uses: googleapis/release-please-action@v4
         id: release
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+  # One release (fishsense-core-v<X.Y.Z>, which carries the wheels), but the
+  # underscore tag lives on: fishsense-mobile pins it as a git dep and records
+  # it as core_version provenance. A bare tag, no GitHub Release. Its own job so
+  # a failure here can't hold up the wheels, and idempotent so a
+  # workflow_dispatch rerun with the hyphen tag (re)creates it.
+  tag-python:
+    needs: release-please
+    if: |
+      always() && (
+        needs.release-please.outputs.release_created == 'true' ||
+        (github.event_name == 'workflow_dispatch' && inputs.tag != '')
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Add the fishsense_core-v<X.Y.Z> tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag != '' && inputs.tag || needs.release-please.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          case "$TAG" in
+            fishsense-core-v*) ;;
+            *) echo "::error::expected a fishsense-core-v<X.Y.Z> tag, got '$TAG'"; exit 1 ;;
+          esac
+          py_tag="fishsense_core-v${TAG#fishsense-core-v}"
+          sha=$(gh api "repos/$REPO/commits/$TAG" --jq .sha)
+          if existing=$(gh api "repos/$REPO/commits/$py_tag" --jq .sha 2>/dev/null); then
+            if [ "$existing" = "$sha" ]; then
+              echo "$py_tag already on $sha"
+              exit 0
+            fi
+            echo "::error::$py_tag is on $existing, but $TAG is on $sha"
+            exit 1
+          fi
+          gh api "repos/$REPO/git/refs" -f "ref=refs/tags/$py_tag" -f "sha=$sha"
+          echo "created $py_tag on $sha"
 
   build-wheel:
     needs: release-please

@@ -1,5 +1,8 @@
 # Changelog
 
+Releases after 4.2.0 are recorded in [rust/fishsense-core/CHANGELOG.md](../../rust/fishsense-core/CHANGELOG.md),
+which now covers both the crate and this package (one version, one release).
+
 ## [4.2.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v4.1.0...fishsense_core-v4.2.0) (2026-10-23)
 
 
