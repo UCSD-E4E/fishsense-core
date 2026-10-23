@@ -22,14 +22,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
-      release_created: ${{ steps.release.outputs['rust/fishsense-core--release_created'] }}
-      tag_name: ${{ steps.release.outputs['rust/fishsense-core--tag_name'] }}
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
       - uses: googleapis/release-please-action@v4
         id: release
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+      # One release (fishsense-core-v<X.Y.Z>, which carries the wheels), but the
+      # underscore tag lives on: fishsense-mobile pins it as a git dep and
+      # records it as core_version provenance. A bare tag, no GitHub Release.
+      - name: Add the fishsense_core-v<X.Y.Z> tag
+        if: steps.release.outputs.release_created == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.release.outputs.version }}
+          SHA: ${{ steps.release.outputs.sha }}
+        run: gh api "repos/${{ github.repository }}/git/refs" -f "ref=refs/tags/fishsense_core-v$VERSION" -f "sha=$SHA"
 
   build-wheel:
     needs: release-please
