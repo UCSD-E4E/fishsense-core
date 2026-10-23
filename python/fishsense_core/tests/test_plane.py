@@ -203,17 +203,27 @@ def test_recovers_the_plane_a_known_pose_put_the_target_on():
         assert abs(float(plane.normal @ point) - plane.distance) < 1e-7
 
 
-def test_accepts_three_column_body_points_and_ignores_z():
-    """(N, 3) body points behave as (N, 2): the z column is discarded."""
+def test_accepts_three_column_body_points_on_the_z_zero_plane():
+    """(N, 3) body points with z = 0 behave exactly as (N, 2)."""
     body = _slate_body()
-    body3 = np.column_stack([body, np.full(len(body), 9.0)])
+    body3 = np.column_stack([body, np.zeros(len(body))])
     a = plane_from_correspondences(body, _observed(body), CAMERA_MATRIX)
     b = plane_from_correspondences(body3, _observed(body), CAMERA_MATRIX)
     np.testing.assert_array_equal(a.normal, b.normal)
     assert a.distance == b.distance
 
 
-def test_solvepnp_does_not_refuse_a_degenerate_correspondence_set():
+@pytest.mark.parametrize("z", [9.0, 0.01])
+def test_a_target_with_real_depth_is_refused(z):
+    """Services discarded the z column, so a target with raised markers
+    yielded a plausible plane at the wrong offset with no warning."""
+    body = _slate_body()
+    body3 = np.column_stack([body, np.full(len(body), z)])
+    with pytest.raises(ValueError, match="z column is not zero"):
+        plane_from_correspondences(body3, _observed(body), CAMERA_MATRIX)
+
+
+def test_a_degenerate_correspondence_set_is_not_an_error():
     """**A trap for automatic producers, pinned because it is not obvious.**
     Six coincident body points against six coincident pixels describe no pose
     at all, and `solvePnP` still returns success — so
@@ -223,13 +233,17 @@ def test_solvepnp_does_not_refuse_a_degenerate_correspondence_set():
     degeneracy check. A producer that generates correspondences automatically
     must gate on its own detection quality — a partially-detected or collinear
     board has to be rejected before it gets this far.
+
+    This pins only this function's contract, a Plane or None and never an
+    exception; whether OpenCV succeeds on rank-deficient input is OpenCV's
+    behaviour and may change.
     """
     body = np.zeros((6, 2))
     image = np.full((6, 2), 2048.0)
 
     plane = plane_from_correspondences(body, image, CAMERA_MATRIX)
 
-    assert plane is not None  # documents the gap, does not endorse it
+    assert plane is None or isinstance(plane, Plane)
 
 
 def test_recovers_the_three_d_position_of_a_dot_on_the_plane():
@@ -291,9 +305,9 @@ def test_the_target_shape_does_not_reach_the_answer():
 
     np.testing.assert_allclose(from_slate, truth, atol=1e-6)
     np.testing.assert_allclose(from_board, truth, atol=1e-6)
-    # Services pinned 1e-9 here in float32 via the native handler; core's
-    # float64 intersection gets the two to agree at least that well.
-    np.testing.assert_allclose(from_slate, from_board, atol=1e-9)
+    # Two separate solvePnP solves: agreement is bounded by OpenCV's iterative
+    # solver, not by core, so this is pinned at 1 um, not services' 1e-9.
+    np.testing.assert_allclose(from_slate, from_board, atol=1e-6)
 
 
 # Recorded by running fishsense-services v0.48.0
@@ -331,13 +345,103 @@ def test_reproduces_the_services_result(target):
     plane = plane_from_correspondences(body, _observed(body), CAMERA_MATRIX)
     assert plane is not None
 
-    np.testing.assert_allclose(plane.normal, _SERVICES_NORMAL[target], atol=1e-9)
-    assert plane.distance == pytest.approx(_SERVICES_DISTANCE[target], abs=1e-9)
+    # OpenCV's Levenberg-Marquardt solve is not bit-stable across builds and
+    # BLAS paths, so this pins 1e-6 (a micro-radian, a micrometre), far below
+    # anything that reaches a length, rather than the 1e-9 the recorded
+    # numbers happened to agree to on one machine.
+    np.testing.assert_allclose(plane.normal, _SERVICES_NORMAL[target], atol=1e-6)
+    assert plane.distance == pytest.approx(_SERVICES_DISTANCE[target], abs=1e-6)
 
     for body_xy, expected in zip(_PARITY_BODY_XY, _SERVICES_DOTS[target]):
         pixel = _project(_to_camera(np.array([body_xy]))[0])
         dot = laser_point_on_plane(plane, pixel, CAMERA_MATRIX)
         assert dot is not None
-        # 0.5 um: float32-ray precision at ~1.4 m, with headroom for the
-        # native handler's summation order.
-        np.testing.assert_allclose(dot, expected, rtol=0, atol=5e-7)
+        # 1 um, for the same reason as the plane above.
+        np.testing.assert_allclose(dot, expected, rtol=0, atol=1e-6)
+
+
+# -- the review's fixes: what a pose cannot come from --------------------------
+
+
+@pytest.mark.parametrize("n", [0, 1, 3])
+def test_too_few_correspondences_are_skipped_not_raised(n):
+    """A partly detected board or a slate with three labelled points: OpenCV
+    asserts npoints >= 4 and would abort the dive."""
+    body = _slate_body()[:n]
+    assert plane_from_correspondences(body, _observed(_slate_body())[:n], CAMERA_MATRIX) is None
+
+
+@pytest.mark.parametrize("where", ["image", "body"])
+def test_a_non_finite_point_is_skipped(where):
+    """A missed corner filled with NaN used to reach solvePnP and could come
+    back as a NaN plane, which laser_point_on_plane would pass on."""
+    body = _slate_body().astype(float)
+    image = _observed(body).astype(float)
+    (image if where == "image" else body)[2, 0] = np.nan
+    assert plane_from_correspondences(body, image, CAMERA_MATRIX) is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [np.zeros((6, 1)), np.zeros(6), np.zeros((6, 4))],
+    ids=["one-column", "flat", "four-column"],
+)
+def test_a_malformed_body_is_a_caller_error(body):
+    """An (N, 1) array used to broadcast into both columns, (x, x, 0), and fit
+    a plausible wrong plane."""
+    with pytest.raises(ValueError, match="body_points must be"):
+        plane_from_correspondences(body, np.zeros((6, 2)), CAMERA_MATRIX)
+
+
+def test_mismatched_counts_are_a_caller_error():
+    with pytest.raises(ValueError, match="pair by position"):
+        plane_from_correspondences(_slate_body(), _observed(_slate_body())[:-1], CAMERA_MATRIX)
+
+
+def test_the_camera_matrix_takes_any_numeric_form():
+    """As laser_point_on_plane already did: a nested list, ints, or flat."""
+    body = _slate_body()
+    image = _observed(body)
+    want = plane_from_correspondences(body, image, np.asarray(CAMERA_MATRIX, dtype=float))
+    for k in (
+        np.asarray(CAMERA_MATRIX).tolist(),
+        np.asarray(CAMERA_MATRIX).reshape(-1),
+        np.round(np.asarray(CAMERA_MATRIX)).astype(int),
+    ):
+        got = plane_from_correspondences(body, image, k)
+        assert got is not None
+        angle, offset = plane_difference(got, want)
+        assert angle < 0.05 and offset < 1.0
+
+
+def test_the_slate_estimator_and_this_function_share_one_solve():
+    """One pose solver: a fix to its validation reaches both producers."""
+    import inspect  # pylint: disable=import-outside-toplevel
+
+    from fishsense_core.slate import estimator  # pylint: disable=import-outside-toplevel
+
+    source = inspect.getsource(estimator)
+    assert "pose_from_correspondences(" in source
+    assert "cv2.solvePnP(" not in source
+
+
+def test_the_plane_module_imports_without_opencv():
+    """Plane, plane_difference and laser_point_on_plane are numpy; OpenCV is
+    loaded only when a pose is solved."""
+    import subprocess  # pylint: disable=import-outside-toplevel
+    import sys  # pylint: disable=import-outside-toplevel
+
+    import fishsense_core.plane as plane_module  # pylint: disable=import-outside-toplevel
+
+    # The child loads plane.py on its own, not the package (whose other
+    # modules import OpenCV), with cv2 made unimportable.
+    code = (
+        "import sys; sys.modules['cv2'] = None\n"
+        "import importlib.util as u\n"
+        f"s = u.spec_from_file_location('plane_alone', {plane_module.__file__!r})\n"
+        "m = u.module_from_spec(s); sys.modules['plane_alone'] = m; s.loader.exec_module(m)\n"
+        "print(m.plane_difference(m.Plane(m.np.array([0., 0., 1.]), 1.0),"
+        " m.Plane(m.np.array([0., 0., 1.]), 1.0)))\n"
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
+    assert out.returncode == 0, out.stderr
