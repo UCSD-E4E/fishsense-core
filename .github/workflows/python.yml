@@ -78,8 +78,10 @@ jobs:
   # wherever torch is absent, which is the base job above, so this job installs
   # CPU torch + timm (the [headtail-keypoints] extra, from the CPU index so the
   # runner is not asked for a CUDA runtime) and runs only the files that use
-  # them. A test that still skips here for want of torch is a failure, so the
-  # step greps the skip summary.
+  # them. Any skip here is a failure (both files skip only for want of torch or
+  # timm), so the step greps the skip summary. `shell: bash` is what turns on
+  # pipefail: the default `bash -e` takes the pipeline's status from `tee`, and
+  # a failing pytest would go green.
   test-ubuntu-torch:
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -101,6 +103,7 @@ jobs:
         uv sync --group dev
         uv pip install --torch-backend=cpu torch timm
     - name: Run the torch-backed tests
+      shell: bash
       run: |
         uv run --no-sync pytest --timeout=300 -rs tests/test_headtail_keypoints.py tests/test_fish_at_dot.py | tee pytest.log
-        if grep -q "could not import 'torch'" pytest.log; then echo "torch tests skipped"; exit 1; fi
+        if grep -q "^SKIPPED" pytest.log; then echo "torch-backed tests skipped"; exit 1; fi

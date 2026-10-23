@@ -65,10 +65,14 @@ slate = [
 # The snout/fork keypoint model (fishsense_core.fish.headtail_keypoints): a
 # ConvNeXt-Tiny SimCC network in PyTorch, built through timm. Kept out of the
 # base install for the same reason as the laser detector. The crop rule and
-# the decode are numpy and import without it.
+# the decode are numpy and import without it. torch 2.5 is the first with
+# `torch.serialization.safe_globals`, which the restricted checkpoint load
+# needs; huggingface-hub is what HuggingFaceStore fetches the pinned
+# checkpoint with (declared, not left to arrive through timm).
 headtail-keypoints = [
-    "torch>=2.4",
+    "torch>=2.5",
     "timm>=1.0",
+    "huggingface-hub>=0.26",
 ]
 
 [tool.pytest.ini_options]

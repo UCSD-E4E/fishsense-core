@@ -63,6 +63,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Sequence, Tuple
@@ -240,6 +241,7 @@ def _check_image(img: Any, what: str) -> np.ndarray:
 
 
 _SIMCC: Any = None
+_SIMCC_LOCK = threading.Lock()
 
 
 def _simcc_class() -> Any:
@@ -250,6 +252,17 @@ def _simcc_class() -> Any:
     global _SIMCC  # pylint: disable=global-statement
     if _SIMCC is not None:
         return _SIMCC
+    # Two threads warming two detectors at once must not each define a class:
+    # one would be found at headtail_keypoints.SimCC and the other's modules
+    # would neither compare by type nor pickle.
+    with _SIMCC_LOCK:
+        if _SIMCC is None:
+            _SIMCC = _define_simcc()
+    return _SIMCC
+
+
+def _define_simcc() -> Any:
+    """Define the network class. Called once, under the lock."""
     torch = require("torch", _EXTRA, "HeadTailKeypointDetector")
     timm = require("timm", _EXTRA, "HeadTailKeypointDetector")
     nn = torch.nn
@@ -283,7 +296,6 @@ def _simcc_class() -> Any:
 
     SimCC.__module__ = __name__
     SimCC.__qualname__ = SimCC.__name__
-    _SIMCC = SimCC
     return SimCC
 
 
@@ -304,12 +316,19 @@ def build_model(pretrained: bool = False) -> "torch.nn.Module":
 def _checkpoint_safe_globals() -> list:
     """What the checkpoint's non-tensor payload (``epoch``, ``length_val``:
     numpy scalars from pandas) needs the restricted unpickler to allow,
-    beyond its defaults. Resolved by name so a numpy without one of them
-    (the ``numpy.core`` path is numpy 1's) is not an error."""
+    beyond its defaults. Resolved by name so a numpy without one of them is
+    not an error. The scalar reconstructor lives at ``numpy._core`` on numpy 2
+    and ``numpy.core`` on numpy 1; ``numpy.core`` is only tried when
+    ``numpy._core`` is absent, because on numpy 2 it is a shim that warns on
+    every load (an error under ``-W error``)."""
     allowed = []
+    try:
+        import numpy._core.multiarray  # noqa: F401  # pylint: disable=unused-import
+        scalar_path = "numpy._core.multiarray.scalar"
+    except ImportError:  # numpy 1
+        scalar_path = "numpy.core.multiarray.scalar"
     for path in (
-        "numpy.core.multiarray.scalar",
-        "numpy._core.multiarray.scalar",
+        scalar_path,
         "numpy.dtype",
         "numpy.dtypes.Float64DType",
         "numpy.dtypes.Float32DType",
@@ -429,8 +448,12 @@ class HeadTailKeypointDetector:
 
         Raises:
             TypeError: A crop is not uint8.
-            ValueError: A crop is not ``(H, W, 3)``, or is empty.
+            ValueError: A crop is not ``(H, W, 3)``, or is empty; or ``batch``
+                is not a positive integer (a negative one would return no
+                keypoints for every crop, and zero an opaque ``range`` error).
         """
+        if isinstance(batch, bool) or not isinstance(batch, int) or batch < 1:
+            raise ValueError(f"batch must be a positive integer; got {batch!r}")
         torch = self._torch
         crops = [_check_image(c, f"crop {i}") for i, c in enumerate(crops)]
         keypoints, confidences = [], []

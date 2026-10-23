@@ -11,7 +11,9 @@ import hashlib
 import io
 import pickle
 import sys
+import threading
 import types
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -87,6 +89,50 @@ def test_crop_from_box_never_leaves_the_frame():
     x0, y0, x1, y1 = crop_from_box((10, 10, 300, 100), 800, 600)
     assert (x0, y0) == (0, 0)
     assert x1 <= 800 and y1 <= 600
+
+
+def test_the_crop_rule_reads_the_stages_half_open_box():
+    """The keypoint model crops by FishAtDot.mask_bbox, so the box convention
+    is part of the model input. The experiment's boxes are half-open: of its
+    5,073 rows, 56 touch the window's right edge and every one ends at
+    exactly crop_x + 1800 (none at 1799); the 5 that touch the bottom end at
+    crop_y + 1350. Core's stage produces the same convention, pinned here on
+    a mask touching the window's right edge, so a production crop is cut
+    from the same box a training crop was."""
+    from fishsense_core.fish.fish_at_dot import (  # pylint: disable=import-outside-toplevel
+        CROP_WIDTH,
+        crop_origin,
+        find_fish_at_dot,
+    )
+
+    class _OneMask:  # pylint: disable=too-few-public-methods
+        def __init__(self, mask):
+            self._mask = mask
+
+        def segment(self, _image):
+            return [self._mask]
+
+    class _Ends:  # pylint: disable=too-few-public-methods
+        def find_head_tail_img(self, mask):
+            ys, xs = np.nonzero(mask)
+            return np.array([xs.max(), ys[0]], float), np.array([xs.min(), ys[0]], float)
+
+    dot = (2000.0, 1500.0)
+    ox, oy = crop_origin(*dot, FRAME_W, FRAME_H)
+    mask = np.zeros((1350, CROP_WIDTH), np.uint8)
+    mask[600:700, 1500:] = 1  # runs into the window's last column
+    mask[int(dot[1] - oy), int(dot[0] - ox)] = 1
+    mask[650, int(dot[0] - ox) : 1500] = 1
+
+    fish = find_fish_at_dot(
+        np.zeros((FRAME_H, FRAME_W, 3), np.uint8), [dot], _OneMask(mask), head_tail_detector=_Ends()
+    )
+
+    assert fish.mask_bbox[2] - fish.crop_x == CROP_WIDTH, "half-open: last column + 1"
+    x0, y0, x1, y1 = fish.mask_bbox
+    assert crop_from_box(fish.mask_bbox, FRAME_W, FRAME_H) == sut.square_crop(
+        0.5 * (x0 + x1), 0.5 * (y0 + y1), float(np.hypot(x1 - x0, y1 - y0)), FRAME_W, FRAME_H, 1.4
+    )
 
 
 # ── warp and lift ───────────────────────────────────────────────────────────
@@ -292,6 +338,24 @@ class TestPredictRefusesWhatItCannotMeasure:
             self.det.predict_crops([good.astype(np.float32)])
 
 
+class TestBatchMustBePositive:
+    @pytest.fixture(autouse=True)
+    def _det(self, torch):
+        self.det = HeadTailKeypointDetector(_Peaked(torch, [(10, 10), (20, 20)]), device="cpu")
+        self.crops = [np.zeros((50, 80, 3), dtype=np.uint8)] * 2
+
+    @pytest.mark.parametrize("batch", [0, -1, 1.5, True, "8"])
+    def test_a_non_positive_or_non_integer_batch_is_refused(self, batch):
+        """A negative batch used to return no keypoints for every crop, and
+        zero an opaque range() error."""
+        with pytest.raises(ValueError, match="batch must be a positive integer"):
+            self.det.predict_crops(self.crops, batch=batch)
+
+    def test_a_batch_of_one_still_works(self):
+        points, conf = self.det.predict_crops(self.crops, batch=1)
+        assert points.shape == (2, NK, 2) and conf.shape == (2,)
+
+
 class TestTheNetworkIsOneClass:
     """The experiment had SimCC at module level. Defined inside build_model
     it would be a new class per call: isinstance across instances fails and
@@ -309,6 +373,32 @@ class TestTheNetworkIsOneClass:
         klass = sut.SimCC
         assert (klass.__module__, klass.__qualname__) == (sut.__name__, "SimCC")
         assert pickle.loads(pickle.dumps(klass)) is klass
+
+    def test_threads_racing_to_build_get_one_class(self, monkeypatch):
+        """Two detectors warmed at once must not each define the class."""
+        monkeypatch.setattr(sut, "_SIMCC", None)
+        real = sut._define_simcc  # pylint: disable=protected-access
+        barrier = threading.Barrier(8)
+
+        def slow_define():
+            klass = real()
+            threading.Event().wait(0.05)  # widen the window a race would need
+            return klass
+
+        monkeypatch.setattr(sut, "_define_simcc", slow_define)
+        got = []
+
+        def build():
+            barrier.wait()
+            got.append(sut._simcc_class())  # pylint: disable=protected-access
+
+        threads = [threading.Thread(target=build) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert len({id(k) for k in got}) == 1
+        assert got[0] is sut.SimCC
 
     def test_a_whole_module_round_trips_through_torch_save(self, torch):
         module = sut.build_model()
@@ -352,6 +442,19 @@ def test_from_checkpoint_loads_the_experiments_format_strictly(torch, tmp_path):
 
     torch.save({"model": {"cls_x.weight": torch.zeros(1)}, "epoch": 1}, path)
     with pytest.raises(RuntimeError):
+        HeadTailKeypointDetector.from_checkpoint(path, device="cpu")
+
+
+def test_from_checkpoint_raises_no_deprecation_warning(torch, tmp_path):
+    """numpy.core is a warning shim on numpy 2; reading the allow-list from
+    it would make every load fail for a caller running with -W error."""
+    pytest.importorskip("timm")
+    path = tmp_path / "best_length.pt"
+    length_val = {"mean_abs_d": np.float64(0.0267)}
+    torch.save({"model": sut.build_model().state_dict(), "epoch": 12, "length_val": length_val}, path)
+    sys.modules.pop("numpy.core.multiarray", None)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
         HeadTailKeypointDetector.from_checkpoint(path, device="cpu")
 
 
