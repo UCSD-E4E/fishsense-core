@@ -52,6 +52,12 @@ python/fishsense_core/
                                    #   when the window cut the fish (the automatic chain).
                                    #   Ported from fishsense-services' headtail_predict;
                                    #   the service keeps JPEG decode, rows and retries
+    fish/headtail_keypoints.py     # SimCC snout/fork model (ConvNeXt-Tiny, 512-px crop
+                                   #   cut by crop_from_box from FishAtDot.mask_bbox).
+                                   #   Ported from 2026-10-22_headtail_keypoints; beats
+                                   #   the SAM rule on reef length, loses on pool p90.
+                                   #   `[headtail-keypoints]` extra; checkpoint not in
+                                   #   models.toml yet (lives on the training host)
     laser.py                       # calibrate_laser() wraps _native.laser.calibrate_laser;
                                    #   re-exports the line fit below
     line_fit.py                    # Per-dive 2-D RANSAC laser line + outlier flags (numpy).

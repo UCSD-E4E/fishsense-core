@@ -62,6 +62,14 @@ slate = [
     "torch>=2.4",
     "huggingface-hub>=0.26",
 ]
+# The snout/fork keypoint model (fishsense_core.fish.headtail_keypoints): a
+# ConvNeXt-Tiny SimCC network in PyTorch, built through timm. Kept out of the
+# base install for the same reason as the laser detector. The crop rule and
+# the decode are numpy and import without it.
+headtail-keypoints = [
+    "torch>=2.4",
+    "timm>=1.0",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
