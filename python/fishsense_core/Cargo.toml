@@ -1,6 +1,6 @@
 [package]
 name = "fishsense_core"
-version = "4.1.0"
+version = "4.2.0"
 edition = "2024"
 build = "build.rs"
 
@@ -18,7 +18,7 @@ cc = "1"
 [dependencies]
 fishsense-core = { path = "../../rust/fishsense-core" }
 ndarray = "0.17.1"
-numpy = "0.27.1"
-pyo3 = "0.27.0"
-pyo3-log = "0.13"
+numpy = "0.29.0"
+pyo3 = "0.29.0"
+pyo3-log = "0.13.4"
 tracing-log = "0.2"

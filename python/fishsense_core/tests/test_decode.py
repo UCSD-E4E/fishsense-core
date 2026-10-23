@@ -768,18 +768,13 @@ class TestOptionalExtras:
 
     def test_an_unimportable_denoiser_says_which_extra_to_install(self):
         """Rather than a bare ModuleNotFoundError from three frames down."""
-        import builtins  # noqa: PLC0415
+        import sys  # noqa: PLC0415
         from unittest.mock import patch  # noqa: PLC0415
 
         from fishsense_core.image import denoise as denoise_module  # noqa: PLC0415
 
-        real_import = builtins.__import__
-
-        def refuse_bm3d(name, *args, **kwargs):
-            if name == "bm3d":
-                raise ImportError("no bm3d here")
-            return real_import(name, *args, **kwargs)
-
-        with patch.object(builtins, "__import__", refuse_bm3d):
+        # A None entry blocks the import whether it goes through the import
+        # statement or importlib.import_module (fishsense_core._optional).
+        with patch.dict(sys.modules, {"bm3d": None}):
             with pytest.raises(ImportError, match=r"fishsense_core\[denoise\]"):
                 denoise_module._import_bm3d()  # pylint: disable=protected-access

@@ -65,6 +65,25 @@ from pathlib import Path
 from fishsense_core.image.raw_image import RawImage
 img = RawImage(Path("photo.ARW"))
 data = img.data  # HxWx3 uint8 BGR
+
+# The head/tail stage: the fish under the laser dot, segmented and keypointed.
+# `sam3` is caller-installed (see fishsense_core/fish/sam3.py); without a GPU,
+# FishialSegmenter.load() runs the embedded Mask R-CNN instead.
+from fishsense_core.fish.fish_at_dot import Sam3Segmenter, find_fish_at_dot
+from fishsense_core.fish.sam3 import load_segmenter
+segmenter = Sam3Segmenter(load_segmenter(store, cache_dir="/models"))
+fish = find_fish_at_dot(rectified_bgr, [(laser_x, laser_y)], segmenter)
+fish.status, fish.head, fish.tail, fish.mask_bbox   # frame pixels; abstentions are statuses
+
+# The snout/fork keypoint model on the same fish (fishsense_core[headtail-keypoints]).
+# Beats the SAM rule on reef length agreement; worse on pool fish models under the
+# per-fish p90 estimator -- see the module docstring before swapping it in.
+from fishsense_core.fish.headtail_keypoints import HeadTailKeypointDetector
+from fishsense_core.models import HuggingFaceStore
+detector = HeadTailKeypointDetector.from_store(HuggingFaceStore(), cache_dir="/models")
+if fish.mask_bbox is not None:            # None on every abstention
+    kp = detector.predict(rectified_bgr, fish.mask_bbox)
+    kp.head, kp.tail, kp.confidence, kp.length_px
 ```
 
 Rust functions are available directly through `fishsense_core._native` (e.g. `_native.laser.calibrate_laser`). Higher-level Python wrappers live in `fishsense_core.*`.
@@ -120,6 +139,9 @@ python/fishsense_core/
   src/lib.rs                  # PyO3 module registration (_native)
   fishsense_core/
     laser.py                  # calibrate_laser Python wrapper
+    fish/sam3.py              # SAM 3.1 loader (sam3 is caller-installed)
+    fish/fish_at_dot.py       # Window at the dot -> segment -> gate -> head/tail
+    fish/headtail_keypoints.py  # SimCC snout/fork model on the SAM-box crop
     image/image.py            # Abstract Image base class
     image/decode.py           # DecodeConfig — the decode chain, parameterised
     image/raw_image.py        # Raw camera image decoding

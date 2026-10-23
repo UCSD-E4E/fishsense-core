@@ -44,6 +44,21 @@ python/fishsense_core/
                                    #   (LocalDirStore / HuggingFaceStore in core; credentialed
                                    #   stores live in the caller). `python -m ... prefetch`
     fish/sam3.py                   # SAM 3.1 loader; `sam3` itself is caller-installed
+    fish/fish_at_dot.py            # The head/tail stage: 1800x1350 window at the first
+                                   #   laser dot -> Segmenter (Sam3Segmenter, or
+                                   #   FishialSegmenter without a GPU) -> the mask a dot
+                                   #   lands on -> FishHeadTailDetector -> frame pixels;
+                                   #   grow_cut_masks=True re-segments the whole frame
+                                   #   when the window cut the fish (the automatic chain).
+                                   #   Ported from fishsense-services' headtail_predict;
+                                   #   the service keeps JPEG decode, rows and retries
+    fish/headtail_keypoints.py     # SimCC snout/fork model (ConvNeXt-Tiny, 512-px crop
+                                   #   cut by crop_from_box from FishAtDot.mask_bbox).
+                                   #   Ported from 2026-10-22_headtail_keypoints; beats
+                                   #   the SAM rule on reef length, loses on pool p90.
+                                   #   `[headtail-keypoints]` extra; checkpoint pinned as
+                                   #   headtail-keypoints/simcc-sam-e12 (public HF repo
+                                   #   ucsde4e/fishsense-headtail-keypoint)
     laser.py                       # calibrate_laser() wraps _native.laser.calibrate_laser;
                                    #   re-exports the line fit below
     line_fit.py                    # Per-dive 2-D RANSAC laser line + outlier flags (numpy).
@@ -121,8 +136,10 @@ The one list of model weights core knows, identified by sha256 per target
 (`server`, `mobile-coreml`). Rust compiles it in; Python reads the same bytes via
 `_native.models.manifest_toml()` (a test pins them equal). Changing a pinned
 model means editing this file, which means a core release — deliberately, so
-`core_version` determines the model. SAM 3.1 is not listed yet: its HF repo is
-gated and hides the hash, so it waits on hashing the `model-weights` bucket copy.
+`core_version` determines the model. SAM 3.1 (`sam3/3.1`) is listed with no
+public origin: its HF repo is gated, so only a credentialed store or a
+`LocalDirStore` can serve it; the hash was measured on the checkpoint
+fishsense-detector pins.
 
 fishsense-mobile builds this crate `default-features = false, features =
 ["coreml"]` and must work offline. The `Mobile build has no runtime network code`

@@ -8,11 +8,16 @@ caller installs it. fishsense-lite pins ``sam3`` from
 ``8e451d5eb43c817b64ae7577fb7b9ae223db88a9``, the commit this loader was
 written against.
 
-SAM 3.1 has no manifest entry yet: ``facebook/sam3.1`` is gated and does not
-publish the checkpoint's hash. Until the ``model-weights`` copy is hashed into
-``models.toml``, :func:`load_segmenter` raises ``KeyError`` for the default
-model. :func:`build_segmenter` loads a checkpoint the caller has already
-fetched.
+``models.toml`` pins SAM 3.1 as ``sam3/3.1`` (``sam3.1_multiplex.pt``) by
+hash and size, with no public origin: ``facebook/sam3.1`` is gated. So
+:func:`load_segmenter` needs a store that has it (the ``model-weights``
+bucket, behind the caller's credentials, or a ``LocalDirStore``), or a
+cache already filled. :func:`build_segmenter` loads a checkpoint the caller
+has already fetched and verified.
+
+The ``Sam3Processor`` either returns is one input to the head/tail stage:
+:class:`fishsense_core.fish.fish_at_dot.Sam3Segmenter` wraps it for
+:func:`fishsense_core.fish.fish_at_dot.find_fish_at_dot`.
 """
 
 from __future__ import annotations
@@ -87,7 +92,7 @@ def load_segmenter(
 
     Raises:
         Sam3RequiresGpu: No usable CUDA device.
-        KeyError: The manifest has no such SAM version.
+        KeyError: The manifest has no such SAM version (the default exists).
         fishsense_core.models.ModelIntegrityError: The store's bytes are not
             the pinned checkpoint.
         fishsense_core.models.ModelUnavailable: Not cached and no store has it.
