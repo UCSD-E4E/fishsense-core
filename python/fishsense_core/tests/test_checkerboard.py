@@ -380,8 +380,12 @@ def test_a_grid_that_overruns_either_side_is_refused(detected, why):
     board that detects at exactly 9 x 20 is not something a test can pin down;
     the predicate is the part that has to be right.
     """
-    assert not sut._fits_declared_board(  # pylint: disable=protected-access
-        detected[0], detected[1], BOARD_ROWS, BOARD_COLS
+    assert (
+        sut.pitch_per_detected_axis(
+            detected[0], detected[1], max_rows=BOARD_ROWS, max_cols=BOARD_COLS,
+            pitch_x_m=SQUARE_SIZE_M, pitch_y_m=SQUARE_SIZE_M,
+        )
+        is None
     ), why
 
 
@@ -396,9 +400,13 @@ def test_a_grid_that_overruns_either_side_is_refused(detected, why):
     ],
 )
 def test_a_grid_that_fits_either_way_round_is_accepted(detected):
-    """Orientation is free, so the comparison is on unordered pairs."""
-    assert sut._fits_declared_board(  # pylint: disable=protected-access
-        detected[0], detected[1], BOARD_ROWS, BOARD_COLS
+    """Orientation is free, so either way round fits."""
+    assert (
+        sut.pitch_per_detected_axis(
+            detected[0], detected[1], max_rows=BOARD_ROWS, max_cols=BOARD_COLS,
+            pitch_x_m=SQUARE_SIZE_M, pitch_y_m=SQUARE_SIZE_M,
+        )
+        is not None
     )
 
 
@@ -527,22 +535,12 @@ def test_an_occluder_means_a_dot_on_it_is_refused(squares):
     assert not _accepts(occluded, (centre_x, centre_y))
 
 
-@pytest.mark.parametrize("radius", [2, 8, 16, 20])
+@pytest.mark.parametrize("radius", [4, 8, 12])
 def test_a_saturated_dot_never_costs_us_its_own_frame(radius):
     """The gate must not eat the very observations it exists to protect.
 
-    A bright dot can break local corner detection right where it sits: on a
-    perspective-warped board, a 16 px radius against a ~32 px corner spacing
-    does collapse the grid (to 7 x 10 of 10 x 14). The question that matters
-    is not whether the grid shrank but whether the DOT survives, and it does —
-    the sub-grid the detector falls back to still spans it, at every radius up
-    to a full square across.
-
-    That is the same one-square threshold from the other side: an occluder has
-    to exceed roughly a square before the surviving rectangle no longer covers
-    it. Below that the gate keeps the frame; above it, it drops the dot. The
-    limit on the gate's power and its protection against false rejection are
-    the same number.
+    A bright dot up to 12 px across a ~32 px corner spacing leaves a true
+    lattice that still spans it, and the frame is kept.
     """
     board = _warped(_render())
     height, width = board.shape[:2]
@@ -551,6 +549,36 @@ def test_a_saturated_dot_never_costs_us_its_own_frame(radius):
     cv2.circle(dotted, centre, radius, 255, -1)
 
     assert _accepts(dotted, centre)
+
+
+@pytest.mark.parametrize("radius", [16, 20])
+def test_a_larger_dot_makes_the_detector_skip_rows_and_the_frame_is_refused(radius):
+    """**The 2x scale error, provoked for real.** At 16 px and up the detector
+    falls back to a 7 x 10 grid of the 10 x 14 board -- and it is every other
+    row: adjacent detected rows are ~66 px apart where the squares are ~33.
+    Labelled one pitch apart, that halves the board's distance along that
+    axis. The services port (and this test, before it) accepted it as
+    "a sub-grid that still spans the dot". Its homography is perfect; its
+    checker parity is ~0.13, and the frame is refused.
+    """
+    board = _warped(_render())
+    height, width = board.shape[:2]
+    centre = (width // 2, height // 2)
+    dotted = board.copy()
+    cv2.circle(dotted, centre, radius, 255, -1)
+
+    cv2.setRNGSeed(0)
+    found, corners, meta = cv2.findChessboardCornersSBWithMeta(
+        dotted, (3, 3), cv2.CALIB_CB_EXHAUSTIVE | cv2.CALIB_CB_ACCURACY | cv2.CALIB_CB_LARGER
+    )
+    assert found
+    rows, cols = int(meta.shape[0]), int(meta.shape[1])
+    grid = np.asarray(corners, np.float64).reshape(rows, cols, 2)
+    step_rows = np.median(np.linalg.norm(np.diff(grid, axis=0), axis=2))
+    step_cols = np.median(np.linalg.norm(np.diff(grid, axis=1), axis=2))
+    assert step_rows / step_cols == pytest.approx(2.0, rel=0.1), "every other row"
+
+    assert _detect(dotted) is None
 
 
 def test_a_mis_latticed_detection_is_refused():
@@ -577,7 +605,8 @@ def test_a_mis_latticed_detection_is_refused():
     residual = sut.grid_residual_px(body, image)
 
     # A uniformly scaled grid IS still a perfect grid, so the homography
-    # absorbs it — which is exactly why the guard cannot be the whole answer.
+    # absorbs it — which is why `checker_parity` exists (tested below on a
+    # real image).
     assert residual < sut.MAX_GRID_RESIDUAL_FRACTION * spacing
 
     # What it does catch is the incoherent case: corners that are not a
@@ -595,8 +624,8 @@ def test_the_quality_gate_keeps_every_genuine_detection():
     """The gate must not cost us frames it was not aimed at.
 
     Measured across the shapes the corpus actually produces: full board, seen
-    at an angle, cropped, and occluded. All sit at <=0.1% of a square where
-    the threshold is 5%.
+    at an angle, cropped, and occluded. The worst corner sits at <=1.5 % of a
+    square where the threshold is 5 %.
     """
     board = _warped(_render())
     height, width = board.shape[:2]
@@ -618,7 +647,9 @@ def test_the_quality_gate_keeps_every_genuine_detection():
             detected.image_points, detected.rows, detected.cols
         )
         residual = sut.grid_residual_px(detected.body_points, detected.image_points)
-        assert residual < 0.01 * spacing, (label, residual, spacing)
+        # The worst corner, not the median: an occluder's edge corner reaches
+        # ~1.5 % of the spacing, against the 5 % threshold.
+        assert residual < 0.02 * spacing, (label, residual, spacing)
 
 
 # ---------- v2: per-axis pitch (was test_checkerboard_pitch.py) ----------
@@ -840,3 +871,117 @@ def test_anisotropic_golden_puts_pitch_y_on_the_detected_columns():
     np.testing.assert_allclose(
         detected.image_points[0], _GOLDEN["warped"][2], atol=1e-4
     )
+
+
+# ---------- the review's fixes ----------
+
+
+def _occluded(squares: int):
+    board = _warped(_render())
+    height, width = board.shape[:2]
+    half = squares * SQUARE_PX // 2
+    board[height // 2 - half : height // 2 + half, width // 2 - half : width // 2 + half] = 128
+    return board
+
+
+def _shape(detected):
+    return None if detected is None else (detected.rows, detected.cols)
+
+
+@pytest.mark.parametrize("squares", [2, 3, 4, 6])
+def test_the_same_frame_gives_the_same_detection_every_time(squares):
+    """OpenCV's detector draws from its random generator on an occluded board;
+    unseeded, a 4-square occluder came back as 4x10, 5x3 or 3x3. Here the
+    generator is scrambled between calls and the answer must not move."""
+    img = _occluded(squares)
+    first = _detect(img)
+    for scramble in range(1, 8):
+        cv2.setRNGSeed(scramble * 7919)
+        cv2.randu(np.empty((64, 64), np.uint8), 0, 255)  # advance it further
+        again = _detect(img)
+        assert _shape(again) == _shape(first)
+        if first is not None:
+            np.testing.assert_array_equal(again.image_points, first.image_points)
+
+
+def test_the_seed_is_a_parameter():
+    img = _occluded(4)
+    assert _shape(_detect(img, seed=0)) == _shape(_detect(img, seed=0))
+
+
+def test_a_lattice_at_twice_the_pitch_is_refused_by_its_parity():
+    """The 2x scale error the homography cannot see. Every other corner of a
+    genuine detection, labelled one pitch apart, is a perfect grid (its worst
+    residual is ~0.02 px) but its cell centres are corner junctions."""
+    img = _render()
+    genuine = _detect(img)
+    assert sut.checker_parity(img, genuine.body_points, genuine.image_points,
+                              genuine.rows, genuine.cols) > 0.99  # fmt: skip
+    grid = genuine.image_points.reshape(genuine.rows, genuine.cols, 2)[::2, ::2]
+    rows, cols = grid.shape[:2]
+    body = (
+        np.stack(np.meshgrid(np.arange(cols), np.arange(rows)), axis=-1).reshape(-1, 2)
+        * SQUARE_SIZE_M
+    ).astype(np.float64)
+    image = grid.reshape(-1, 2)
+    assert sut.grid_residual_px(body, image) < 0.1, "a perfect grid to the homography"
+    assert sut.checker_parity(img, body, image, rows, cols) < sut.MIN_CHECKER_PARITY
+
+
+@pytest.mark.parametrize("squares", [0, 2, 3, 4, 6])
+def test_every_genuine_detection_clears_both_gates(squares):
+    img = _warped(_render()) if squares == 0 else _occluded(squares)
+    detected = _detect(img)
+    assert detected is not None
+    gray = img if img.ndim == 2 else cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    assert sut.checker_parity(gray, detected.body_points, detected.image_points,
+                              detected.rows, detected.cols) > 0.95  # fmt: skip
+    spacing = sut.median_corner_spacing(detected.image_points, detected.rows, detected.cols)
+    assert sut.grid_residual_px(detected.body_points, detected.image_points) < 0.02 * spacing
+
+
+def test_the_residual_is_the_worst_corners_not_the_median():
+    """A minority of corners a full square off: the median hid it."""
+    img = _render()
+    genuine = _detect(img)
+    image = genuine.image_points.copy()
+    image[:10] += SQUARE_PX  # 10 of 140 corners latticed one square off
+    spacing = sut.median_corner_spacing(genuine.image_points, genuine.rows, genuine.cols)
+    assert sut.grid_residual_px(genuine.body_points, image) > sut.MAX_GRID_RESIDUAL_FRACTION * spacing
+
+
+@pytest.mark.parametrize(
+    ("pitch_y", "fits"),
+    [(0.04223 * (1 + 4e-4), True), (0.04223 * (1 + 2.8e-3), False)],
+    ids=["0.04%-same", "0.28%-different"],
+)
+def test_pitches_are_equal_within_a_tolerance(pitch_y, fits):
+    """An ambiguous 10x10 sub-grid: a 0.04 % anisotropy is one square size
+    (no frame dropped), the E4E board's 0.28 % is not (no guess made)."""
+    got = sut.pitch_per_detected_axis(
+        10, 10, max_rows=10, max_cols=14, pitch_x_m=0.04223, pitch_y_m=pitch_y
+    )
+    assert (got is not None) == fits
+
+
+@pytest.mark.parametrize("channels", [1, 3, 4])
+def test_grey_bgr_and_bgra_are_accepted(channels):
+    grey = _render()
+    img = {
+        1: grey[:, :, None],
+        3: cv2.cvtColor(grey, cv2.COLOR_GRAY2BGR),
+        4: cv2.cvtColor(grey, cv2.COLOR_GRAY2BGRA),
+    }[channels]
+    assert _shape(_detect(img)) == _shape(_detect(grey))
+
+
+@pytest.mark.parametrize("dtype", [np.uint16, np.float32])
+def test_a_non_8_bit_image_is_a_clear_error(dtype):
+    """It used to reach OpenCV and raise cv2.error from inside the detector."""
+    with pytest.raises(TypeError, match="uint8"):
+        _detect(_render().astype(dtype))
+
+
+def test_an_unknown_shape_is_a_clear_error():
+    with pytest.raises(ValueError, match="grey, BGR or BGRA"):
+        _detect(np.zeros((40, 40, 2), np.uint8))
