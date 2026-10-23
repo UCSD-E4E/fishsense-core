@@ -450,6 +450,14 @@ N_BOOT = 500
 VARIANT_INDEX = {"sam3": 0, "corners": 1, "sam3_all": 2, "sam3_predline": 3}
 
 
+#: Side by side in one environment the two ports agree bit for bit; across
+#: numpy/BLAS builds Brent's bounded search (xatol 1e-5) lands a few 1e-8 px
+#: apart, which moves a bootstrap SE by ~4e-8 relative (CI, ubuntu numpy). The
+#: services goldens use the same scale (SE rel=1e-6).
+_TV_ABS = 1e-6
+_SE_REL = 1e-6
+
+
 def _shadow_fit(session, variant, line):  # pylint: disable=too-many-locals
     """services `port_fit`, on this module."""
     sized = [f for f in session["frames"] if f["size"] is not None]
@@ -536,8 +544,8 @@ def test_pool_fits_match_the_services_shadow_port(session, variant, tv, se_px):
     module's composition when run side by side."""
     line = "line" if variant == "sam3_all" else "detector_line"
     fit = _shadow_fit(SESSIONS[session], variant, line)
-    assert fit["tv"] == pytest.approx(tv, abs=1e-9)
-    assert fit["se_px"] == pytest.approx(se_px, rel=1e-9)
+    assert fit["tv"] == pytest.approx(tv, abs=_TV_ABS)
+    assert fit["se_px"] == pytest.approx(se_px, rel=_SE_REL)
 
 
 # -- parity: fishsense-services v0.48.0's own fit_label_free, on the golden fixture --
@@ -568,7 +576,7 @@ def test_matches_the_services_fit(mission, tv, se_px, frames, axis, origin):  # 
     )  # fmt: skip
     assert fit.outcome == "accepted"
     assert fit.frames_used == frames
-    assert fit.vanishing_px == pytest.approx(tv, abs=1e-9)
-    assert fit.se_px == pytest.approx(se_px, rel=1e-9)
-    assert fit.laser_axis == pytest.approx(axis, abs=1e-12)
+    assert fit.vanishing_px == pytest.approx(tv, abs=_TV_ABS)
+    assert fit.se_px == pytest.approx(se_px, rel=_SE_REL)
+    assert fit.laser_axis == pytest.approx(axis, abs=1e-9)
     assert fit.laser_position == pytest.approx(origin, abs=1e-12)
