@@ -23,7 +23,9 @@ dependencies = [
     # (libxcb.so.1 etc.) that a worker/headless container lacks. fishsense-core
     # uses no GUI (imshow/waitKey) and no contrib-only modules (aruco/ximgproc/…),
     # so the headless base build is correct, single, and container-safe.
-    "opencv-python-headless>=4.11.0.86",
+    # 5.0 is what the checkerboard detector's behaviour (sub-grid choice,
+    # sub-pixel corners) was measured and pinned on.
+    "opencv-python-headless>=5.0.0.93",
     "rawpy>=0.25.1",
     "scikit-image>=0.25.2",
     # Already present transitively (scikit-image requires it), declared
