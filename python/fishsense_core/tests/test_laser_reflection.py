@@ -18,7 +18,8 @@ loudly instead.
 The golden tests below pin the exact suspects. Every expected value was
 produced by the fishsense-services v0.48.0 original (run against this
 package's ``line_fit``, unchanged since 4.1.0, the version services pins), and
-this port returns the same values bit for bit.
+this port returns the same values bit for bit. ``angle_deg`` is compared to
+an absolute 1e-6 deg (see the test).
 """
 
 from __future__ import annotations
@@ -167,4 +168,8 @@ def test_golden_suspects(name):
     assert suspect.n_primary == n_primary
     assert suspect.n_secondary == n_secondary
     assert suspect.separation_px == pytest.approx(separation_px, rel=1e-12)
-    assert suspect.angle_deg == pytest.approx(angle_deg, rel=1e-9, abs=1e-12)
+    # ``angle_deg`` is arccos(|n1 . n2|) near cos = 1, where arccos's slope is
+    # unbounded: a last-bit difference in the fitted normals (LAPACK build)
+    # moves a 0.008 deg angle by ~5e-9 relative (seen on CI's openblas). An
+    # absolute 1e-6 deg still fails on any real change to the fit.
+    assert suspect.angle_deg == pytest.approx(angle_deg, rel=0, abs=1e-6)
