@@ -26,6 +26,7 @@ from fishsense_core.fish.fish_at_dot import (
     CROP_WIDTH,
     FishialSegmenter,
     Sam3Segmenter,
+    ScoredSegmenter,
     crop_origin,
     cut_by_window,
     find_fish_at_dot,
@@ -867,25 +868,28 @@ def _scored_mask_at(x, y, half_len=200, half_h=60):
 
 
 class _Scored:
-    """A scored segmenter: (mask, score) pairs, crop-local. Its plain
-    `segment` must never be called when `segment_scored` exists."""
+    """A scored segmenter: (mask, score) pairs, crop-local. It records which
+    of its two methods the stage called: `segment` without a gate,
+    `segment_scored` with one, never both."""
 
     def __init__(self, pairs):
         self.pairs = pairs
-        self.calls = 0
+        self.called = []
 
     def segment(self, image):
-        raise AssertionError("segment called on a scored segmenter")
+        self.called.append("segment")
+        assert image.shape[:2] == (CROP_H, CROP_W)
+        return [m for m, _ in self.pairs]
 
     def segment_scored(self, image):
-        self.calls += 1
+        self.called.append("segment_scored")
         assert image.shape[:2] == (CROP_H, CROP_W)
         return self.pairs
 
 
 class _WindowedScored(_Windowed):
     def segment(self, image):
-        raise AssertionError("segment called on a scored segmenter")
+        raise AssertionError("segment called with a gate given")
 
     def segment_scored(self, image):
         self.shapes.append(image.shape[:2])
@@ -946,21 +950,66 @@ class TestScoreGate:
         r = _gated(_Scored([(_scored_mask_at(*DOT), 0.81)]), head_tail_detector=_Exploding())
         assert r.status == "headtail_failed" and r.score == pytest.approx(0.81)
 
-    def test_without_a_gate_a_scored_segmenter_still_reports_its_score(self):
-        r = _find(_frame(), [DOT], _Scored([(_scored_mask_at(*DOT), 0.3)]))
-        assert r.status == "predicted" and r.score == pytest.approx(0.3)
+    def test_with_a_gate_only_segment_scored_is_called(self):
+        seg = _Scored([(_scored_mask_at(*DOT), 0.81)])
+        _gated(seg)
+        assert seg.called == ["segment_scored"]
+
+    def test_without_a_gate_plain_segment_is_called_and_no_score_read(self):
+        """The default path is the one before scores existed: a caller that
+        asked for none reads none, so a scores problem cannot touch it."""
+        seg = _Scored([(_scored_mask_at(*DOT), 0.3)])
+        r = _find(_frame(), [DOT], seg)
+        assert seg.called == ["segment"]
+        assert r.status == "predicted" and r.score is None
+
+    def test_without_a_gate_an_overridden_segment_is_honoured(self):
+        """A subclass that post-processes its masks in `segment` is not
+        bypassed by an inherited `segment_scored`."""
+
+        class _Filtered(_Scored):
+            def segment(self, image):
+                self.called.append("segment")
+                return []  # it filters every mask out
+
+        r = _find(_frame(), [DOT], _Filtered([(_scored_mask_at(*DOT), 0.9)]))
+        assert r.status == "no_detections"
+
+    def test_scored_segmenters_are_recognised_at_runtime(self):
+        assert isinstance(_Scored([]), ScoredSegmenter)
+        assert not isinstance(_Stub([]), ScoredSegmenter)
 
     def test_a_plain_segmenter_scores_nothing_and_is_unchanged(self):
         r = _find(_frame(), [DOT], _Stub([_scored_mask_at(*DOT)]))
         assert r.status == "predicted" and r.score is None
 
-    def test_a_gate_on_a_segmenter_with_no_scores_raises(self):
-        with pytest.raises(TypeError, match="segment_scored"):
-            _gated(_Stub([_scored_mask_at(*DOT)]))
+    def test_a_gate_on_a_segmenter_with_no_scores_raises_before_segmenting(self):
+        """Up front: a frame with no fish must not slip past it."""
+        stub = _Stub([_scored_mask_at(*DOT)])
+        with pytest.raises(TypeError, match="ScoredSegmenter"):
+            _gated(stub)
+        assert stub.seen_shape is None, "nothing was segmented"
 
-    def test_a_gate_on_an_unscored_mask_raises(self):
-        with pytest.raises(ValueError, match="unscored"):
-            _gated(_Scored([(_scored_mask_at(*DOT), None)]))
+    @pytest.mark.parametrize("score", [None, float("nan"), float("inf")], ids=["none", "nan", "inf"])
+    def test_a_gate_on_a_mask_with_no_usable_score_raises(self, score):
+        """A NaN used to fail `>=` and be dropped as a low score."""
+        with pytest.raises(ValueError, match="no usable score"):
+            _gated(_Scored([(_scored_mask_at(*DOT), score)]))
+
+    @pytest.mark.parametrize(
+        "gate", [50, -0.1, 1.5, float("nan"), True, "0.5"], ids=["percent", "neg", "over", "nan", "bool", "str"]
+    )
+    def test_a_gate_out_of_range_raises_before_segmenting(self, gate):
+        """A typo such as 50 would otherwise turn every frame into
+        no_detections, which looks like a dive with no fish."""
+        seg = _Scored([(_scored_mask_at(*DOT), 0.9)])
+        with pytest.raises(ValueError, match=r"score_gate must be a number in \[0, 1\]"):
+            _gated(seg, score_gate=gate)
+        assert not seg.called
+
+    @pytest.mark.parametrize("gate", [0, 0.0, 1, 1.0])
+    def test_the_gates_bounds_are_allowed(self, gate):
+        _gated(_Scored([(_scored_mask_at(*DOT), 1.0)]), score_gate=gate)
 
     def test_the_score_survives_equality_and_hashing(self):
         a = _gated(_Scored([(_scored_mask_at(*DOT), 0.81)]))
@@ -1087,13 +1136,44 @@ class TestSam3SegmenterScores:
         assert scores.transfers == 1
         assert [s for _, s in got] == pytest.approx([0.9, 0.8, 0.7])
 
-    def test_no_scores_means_none_and_segment_is_unchanged(self):
-        masks = [np.zeros((1, 5, 7))]
-        assert [s for _, s in self._scored(masks=masks)] == [None]
-        got = Sam3Segmenter(self._processor_returning({"masks": masks})).segment(
+    def _segment(self, **state_items):
+        return Sam3Segmenter(self._processor_returning(state_items)).segment(
             np.zeros((5, 7, 3), dtype=np.uint8)
         )
-        assert len(got) == 1 and got[0].shape == (5, 7)
+
+    def test_a_build_with_no_scores_is_refused_on_the_first_frame(self):
+        """Even with no masks: the gate's misconfiguration shows at once,
+        not at the first fish, after partial results are written."""
+        with pytest.raises(ValueError, match="returns no scores"):
+            self._scored(masks=[np.zeros((1, 5, 7))])
+        with pytest.raises(ValueError, match="returns no scores"):
+            self._scored(masks=[])
+
+    def test_segment_never_reads_scores(self):
+        """Not for a count mismatch, not with no scores, and no transfer."""
+
+        class _Untouchable:
+            def __getattr__(self, name):
+                raise AssertionError(f"segment read the scores ({name})")
+
+            def __iter__(self):
+                raise AssertionError("segment iterated the scores")
+
+        masks = [np.zeros((1, 5, 7)), np.zeros((1, 5, 7))]
+        assert len(self._segment(masks=masks, scores=self.torch.tensor([0.9]))) == 2
+        assert len(self._segment(masks=masks)) == 2
+        assert len(self._segment(masks=masks, scores=_Untouchable())) == 2
+
+    def test_a_list_of_per_mask_score_tensors_is_read(self):
+        """As masks can be: 0-d tensors, bfloat16 included."""
+        got = self._scored(
+            masks=[np.zeros((1, 5, 7)), np.zeros((1, 5, 7))],
+            scores=[
+                self.torch.tensor(0.75, dtype=self.torch.bfloat16),
+                self.torch.tensor(0.5),
+            ],
+        )
+        assert [s for _, s in got] == pytest.approx([0.75, 0.5])
 
     def test_no_masks_is_empty(self):
         assert not self._scored()
