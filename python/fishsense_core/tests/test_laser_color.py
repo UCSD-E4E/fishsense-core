@@ -28,11 +28,17 @@ Two things that look like improvements and are not:
 * Trusting any single frame. Populate takes the dive-level majority instead,
   which is what turns a 98% per-frame rule into 4/4 dives correct.
 
-The coordinate detail is the one that would fail silently: the detector returns
-*rectified* pixels, while `LinearRawImage` is in **sensor** coordinates. Sample
-one at the other's coordinates and you read the wrong pixels -- near the laser
+The coordinate detail is the one that would fail silently: a rectified point
+(a `rectify_output=True` prediction, a human label) sampled on `LinearRawImage`,
+which is in **sensor** coordinates, reads the wrong pixels -- near the laser
 region that is tens of pixels, easily missing the dot entirely, and the result
-still looks like a plausible colour.
+still looks like a plausible colour. Default predictions are already sensor
+pixels and need no mapping.
+
+Two behaviours differ from the services port on purpose (see the module
+docstring): a saturated dot's margin is scaled by the brightest usable pixel,
+and a float image is not tested for saturation against its own maximum. The
+golden value for the saturated dot below is therefore core's, not services'.
 """
 
 # pylint: disable=missing-function-docstring,no-member,unbalanced-tuple-unpacking
@@ -45,6 +51,7 @@ import pytest
 from fishsense_core.camera_intrinsics import CameraIntrinsics
 from fishsense_core.image.image import Image
 from fishsense_core.image.rectified_image import RectifiedImage
+from fishsense_core.laser import DEFAULT_RIG_PRIOR_BBOX, rectify_prediction, unrectify_prediction
 from fishsense_core.laser_color import (
     MIN_COLOR_MARGIN,
     classify_laser_color,
@@ -218,8 +225,14 @@ def test_round_trip_through_rectified_image(sensor_xy):
     iterative solve. 0.1 px tolerance; measured error is <= 0.008 px.
     """
     sx, sy = sensor_xy
-    ys, xs = np.mgrid[:3000, :4000].astype(np.float32)
-    sensor = np.exp(-((xs - sx) ** 2 + (ys - sy) ** 2) / (2 * 3.0**2))
+    # Only the dot's neighbourhood is drawn: the Gaussian is ~0 beyond 20 px,
+    # so the full-frame grids and exp this used to build bought nothing.
+    sensor = np.zeros((3000, 4000), np.float32)
+    x0, y0 = int(sx) - 20, int(sy) - 20
+    ys, xs = np.mgrid[y0 : y0 + 41, x0 : x0 + 41].astype(np.float32)
+    sensor[y0 : y0 + 41, x0 : x0 + 41] = np.exp(
+        -((xs - sx) ** 2 + (ys - sy) ** 2) / (2 * 3.0**2)
+    )
     rectified = RectifiedImage(
         _ArrayImage(sensor), CameraIntrinsics(np.array(_K), np.array(_D))
     ).data
@@ -277,7 +290,8 @@ def _saturated_green():
             (202, 198),
             ("green", -251.175),
         ),
-        (_saturated_green, (200, 200), ("green", -10.505836575875486)),
+        # services: ("green", -10.505836575875486), scaled by the blown core
+        (_saturated_green, (200, 200), ("green", -229.50000000000003)),
         (
             lambda: _dot(_frame(), 200, 200, (300, 380, 460)),
             (200, 200),
@@ -296,3 +310,83 @@ def test_classify_golden(make, xy, expected):
     assert margin == pytest.approx(expected[1], rel=1e-12)
     if color is None:
         assert abs(margin) < MIN_COLOR_MARGIN
+
+
+# --- the review's fixes -------------------------------------------------------
+
+
+def test_too_close_to_call_keeps_its_margin_and_no_reading_has_none():
+    """Two different abstentions: a reading too close to call reports its
+    margin, a point with no reading reports none."""
+    color, margin = classify_laser_color(_dot(_frame(), 200, 200, (300, 301, 302)), 200, 200)
+    assert color is None and margin is not None and abs(margin) < MIN_COLOR_MARGIN
+    assert classify_laser_color(_frame(), 5000, 5000) == (None, None)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_a_non_finite_point_abstains_rather_than_raising(bad):
+    img = _dot(_frame(), 200, 200, (40, 60, 4000))
+    assert classify_laser_color(img, bad, 200) == (None, None)
+    assert classify_laser_color(img, 200, bad) == (None, None)
+
+
+def test_a_saturated_dot_reads_the_same_in_8_and_16_bit():
+    """The same scene quantised to 8-bit gives the same call and a margin of
+    the same size: a blown core no longer sets the scale and shrinks the
+    halo's margin in 16-bit."""
+    big = _saturated_green()
+    small = (big.astype(np.float64) * 255 / 65535).round().astype(np.uint8)
+    c16, m16 = classify_laser_color(big, 200, 200)
+    c8, m8 = classify_laser_color(small, 200, 200)
+    assert c16 == c8 == "green"
+    assert m8 == pytest.approx(m16, rel=0.05)
+    assert abs(m16) > 50, "decisive, not the ~10 a core-scaled margin gave"
+
+
+def test_a_dim_saturated_halo_still_votes():
+    """R-G of 1000 under a blown 16-bit core: the services code scaled it to
+    about 3.9, under the threshold, and abstained."""
+    img = _frame()
+    _dot(img, 200, 200, (300, 1300, 300), radius=7)
+    _dot(img, 200, 200, (65535, 65535, 65535), radius=3)
+    assert classify_laser_color(img, 200, 200)[0] == "green"
+
+
+def test_a_float_image_in_linear_counts_reads_the_dot():
+    """A float image has no ceiling the array can tell; the old patch-maximum
+    ceiling dropped every dot pixel and read the blue-green background."""
+    img = np.full((400, 400, 3), (90.0, 70.0, 60.0))
+    _dot(img, 200, 200, (200, 400, 4000))
+    assert classify_laser_color(img, 200, 200)[0] == "red"
+
+
+def test_a_float_ceiling_drops_a_blown_core_when_given():
+    img = np.full((400, 400, 3), (0.35, 0.27, 0.23))
+    _dot(img, 200, 200, (0.02, 0.6, 0.02), radius=7)
+    _dot(img, 200, 200, (1.0, 1.0, 1.0), radius=3)
+    assert classify_laser_color(img, 200, 200, full_scale=1.0)[0] == "green"
+
+
+def test_the_inverse_takes_a_flat_camera_matrix_like_the_forward_map():
+    flat = np.array(_K).reshape(-1)
+    assert unrectify_prediction(1580.0, 395.0, flat, np.array(_D)) == unrectify_prediction(
+        1580.0, 395.0, np.array(_K), np.array(_D)
+    )
+    assert rectified_to_sensor_point(1580.0, 395.0, flat, _D) == pytest.approx(
+        (1597.9068028938752, 439.4939539991607), rel=1e-12
+    )
+
+
+def test_the_inverse_lives_beside_the_forward_map():
+    """`fishsense_core.laser` exports both halves of the transform, and they
+    agree to well under a pixel wherever the detector can put a dot: inside
+    its rig-prior box the worst round trip is 0.0006 px. Toward the frame's
+    corners the *forward* map (OpenCV's iterative undistortPoints, in float32)
+    drifts: 0.15 px at (3500, 2700), over 1 px at the extreme corners. The
+    inverse is closed-form; that drift is the forward map's."""
+    k, d = np.array(_K), np.array(_D)
+    x0, y0, x1, y1 = DEFAULT_RIG_PRIOR_BBOX
+    for x in np.linspace(x0, x1, 9):
+        for y in np.linspace(y0, y1, 9):
+            rect = rectify_prediction(x, y, k, d)
+            assert unrectify_prediction(*rect, k, d) == pytest.approx((x, y), abs=0.005)
