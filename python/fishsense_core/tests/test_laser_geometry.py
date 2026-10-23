@@ -16,10 +16,15 @@ or the composition shows up as a number, not as a silent rescale.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pytest
 
+from fishsense_core import world_point
+from fishsense_core.camera_intrinsics import CameraIntrinsics
 from fishsense_core.world_point import (
+    DEFAULT_MIN_PARALLAX_RAD,
     LaserPoint,
     WorldPointHandler,
     compute_laser_point,
@@ -124,7 +129,9 @@ def test_residual_is_near_zero_for_a_consistent_dot():
     point = compute_laser_point(dot, POSITION, AXIS, intrinsics)
 
     assert point.depth_m == pytest.approx(truth[2], rel=1e-3)
-    assert point.residual_m < 1e-5
+    # 10x the float32 solve's ~1e-5 m noise floor at metre scale: a
+    # consistent dot is far below it, and this does not ride the floor.
+    assert point.residual_m < 1e-4
 
 
 def test_residual_grows_when_the_dot_cannot_be_on_the_laser():
@@ -180,35 +187,51 @@ def test_length_at_depth_matches_the_inline_composition():
 def test_geometry_with_no_intersection_yields_a_non_positive_depth():
     """How failure actually presents, which is not how it reads.
 
-    A laser axis parallel to the image plane never meets the camera ray, and
-    the kernel answers with the origin rather than NaN or an exception. It is
-    just as willing to return a *negative* depth when the dot sits on the
-    wrong side of the principal point for the laser's offset. Neither is
-    caught by an ``isfinite`` check, so callers gate on ``depth_m > 0``.
+    A laser along the camera's own x axis, origin (0.104, 0, 0) and axis
+    (1, 0, 0), passes through the camera centre, so it meets *every* camera
+    ray there: the kernel answers with the origin, depth 0, residual ~0 (an
+    exact intersection, not a missed one), rather than NaN or an exception.
+    It is just as willing to return a *negative* depth when the dot sits on
+    the wrong side of the principal point for the laser's offset. Neither is
+    caught by an ``isfinite`` check; is_measurable rejects both.
     """
     intrinsics = _intrinsics()
 
     parallel = compute_laser_point(DOT, POSITION, (1.0, 0.0, 0.0), intrinsics)
     assert parallel.depth_m <= 0.0
     assert np.isfinite(parallel.depth_m), "not NaN -- an isfinite guard misses it"
+    assert parallel.residual_m < 1e-4, "the lines do meet, at the camera centre"
+    assert not parallel.is_measurable()
 
     # Laser offset along +x, so a real dot always lands right of the principal
     # point. A label to the left of it inverts the solve.
     wrong_side = compute_laser_point((800.0, 700.0), POSITION, AXIS, intrinsics)
     assert wrong_side.depth_m < 0.0
     assert np.isfinite(wrong_side.depth_m)
+    assert not wrong_side.is_measurable()
 
 
-def test_a_length_survives_a_negative_depth_unchanged():
-    """The reason the guard belongs on the depth and not on the length: the
+def test_a_negative_depth_would_give_a_plausible_length_so_it_is_refused():
+    """Why the guard belongs on the depth and not on the length: the
     back-projection is linear in depth, so flipping its sign moves head and
-    tail together and leaves their separation identical."""
+    tail together and leaves their separation identical. A length cannot
+    reveal a behind-the-camera depth, so measure_length_at_depth refuses one
+    (services' copy measured it)."""
     intrinsics = _intrinsics()
+    handler = WorldPointHandler(np.linalg.inv(intrinsics))
 
-    positive = measure_length_at_depth(HEAD, TAIL, 1.5, intrinsics)
-    negative = measure_length_at_depth(HEAD, TAIL, -1.5, intrinsics)
+    def span(depth):
+        return float(
+            np.linalg.norm(
+                handler.compute_world_point_from_depth(HEAD, depth)
+                - handler.compute_world_point_from_depth(TAIL, depth)
+            )
+        )
 
-    assert negative == pytest.approx(positive)
+    assert span(-1.5) == pytest.approx(span(1.5))
+    assert measure_length_at_depth(HEAD, TAIL, 1.5, intrinsics) == pytest.approx(span(1.5))
+    with pytest.raises(ValueError, match="finite and positive"):
+        measure_length_at_depth(HEAD, TAIL, -1.5, intrinsics)
 
 
 def test_accepts_integer_pixels_and_lists():
@@ -254,3 +277,109 @@ def test_matches_services_numbers(dot, depth, range_, residual, length):
     assert measure_length_at_depth(
         _REAL_HEAD, _REAL_TAIL, point.depth_m, _REAL_K
     ) == pytest.approx(length, rel=1e-5)
+
+
+# -- near the laser's vanishing point -----------------------------------------
+#
+# The laser here runs parallel to the optical axis, so its vanishing point is
+# the principal point (1000, 750). A real dot at depth Z lands at
+# x = 1000 + 2000 * 0.104 / Z: 1020.8 px at 10 m, 1002.08 px at 100 m.
+
+
+def test_a_real_dot_is_measurable():
+    intrinsics = _intrinsics()
+    _, pixel = _on_laser_dot(intrinsics)
+    point = compute_laser_point(pixel, POSITION, AXIS, intrinsics)
+    assert point.is_measurable()
+    # The parallax is the angle the 0.104 m baseline subtends at 1.5 m.
+    assert point.parallax_rad == pytest.approx(math.atan(0.104 / 1.5), rel=1e-3)
+
+
+@pytest.mark.parametrize("pixel_x", [1000.5, 1000.05])
+def test_a_dot_near_the_vanishing_point_is_not_measurable(pixel_x):
+    """Finite, and maybe positive, but the camera ray and the laser are nearly
+    parallel: one pixel of dot error moves this depth by more than itself.
+    depth_m > 0 alone would let it through."""
+    point = compute_laser_point((pixel_x, 750.0), POSITION, AXIS, _intrinsics())
+    assert point.parallax_rad < DEFAULT_MIN_PARALLAX_RAD
+    assert not point.is_measurable()
+
+
+def test_a_dot_at_the_vanishing_point_is_not_measurable_whatever_comes_back():
+    """Exactly parallel: the solve divides by ~0 and may return inf, nan or a
+    finite number of either sign. is_measurable rejects all of them."""
+    point = compute_laser_point((1000.0, 750.0), POSITION, AXIS, _intrinsics())
+    assert point.parallax_rad == pytest.approx(0.0, abs=1e-12)
+    assert not point.is_measurable()
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        dict(depth_m=math.inf, range_m=math.inf, residual_m=0.0, parallax_rad=0.1),
+        dict(depth_m=math.nan, range_m=1.0, residual_m=0.0, parallax_rad=0.1),
+        dict(depth_m=1.0, range_m=1.0, residual_m=math.nan, parallax_rad=0.1),
+        dict(depth_m=-1.0, range_m=1.0, residual_m=0.0, parallax_rad=0.1),
+        dict(depth_m=0.0, range_m=0.0, residual_m=0.0, parallax_rad=0.1),
+        dict(depth_m=1.0, range_m=1.0, residual_m=0.0, parallax_rad=0.001),
+    ],
+    ids=["inf", "nan-depth", "nan-residual", "behind", "zero", "low-parallax"],
+)
+def test_is_measurable_rejects(fields):
+    assert not LaserPoint(**fields).is_measurable()
+
+
+def test_is_measurable_honours_a_maximum_depth_and_a_parallax_floor():
+    point = LaserPoint(depth_m=12.0, range_m=12.0, residual_m=0.0, parallax_rad=0.008)
+    assert point.is_measurable()
+    assert not point.is_measurable(max_depth_m=10.0)
+    assert not point.is_measurable(min_parallax_rad=0.01)
+
+
+@pytest.mark.parametrize("depth", [math.inf, -math.inf, math.nan, 0.0, -1.5])
+def test_no_length_at_a_depth_that_cannot_carry_one(depth):
+    """An inf or behind-the-camera depth can never become a stored length."""
+    with pytest.raises(ValueError, match="finite and positive"):
+        measure_length_at_depth(HEAD, TAIL, depth, _intrinsics())
+
+
+# -- the camera matrix ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        np.zeros((2, 3)),
+        np.zeros((3, 3)),
+        np.array([[2000.0, 0, 1000], [0, math.nan, 750], [0, 0, 1]]),
+    ],
+    ids=["not-3x3", "singular", "nan"],
+)
+def test_a_bad_camera_matrix_is_a_value_error(bad):
+    """Not a LinAlgError a ValueError handler would miss, and not a NaN K
+    silently turning every depth into NaN."""
+    with pytest.raises(ValueError, match="camera_matrix"):
+        compute_laser_point(DOT, POSITION, AXIS, bad)
+    with pytest.raises(ValueError, match="camera_matrix"):
+        measure_length_at_depth(HEAD, TAIL, 1.5, bad)
+
+
+def test_camera_intrinsics_are_accepted_as_they_are():
+    intrinsics = _intrinsics()
+    camera = CameraIntrinsics(intrinsics, np.zeros(5))
+    assert compute_laser_point(DOT, POSITION, AXIS, camera) == compute_laser_point(
+        DOT, POSITION, AXIS, intrinsics
+    )
+    assert measure_length_at_depth(HEAD, TAIL, 1.5, camera) == measure_length_at_depth(
+        HEAD, TAIL, 1.5, intrinsics
+    )
+
+
+def test_k_is_inverted_once_per_camera_not_per_call():
+    world_point._handler_from_bytes.cache_clear()  # pylint: disable=protected-access
+    intrinsics = _intrinsics()
+    for _ in range(5):
+        point = compute_laser_point(DOT, POSITION, AXIS, intrinsics)
+        measure_length_at_depth(HEAD, TAIL, abs(point.depth_m) or 1.0, intrinsics)
+    info = world_point._handler_from_bytes.cache_info()  # pylint: disable=protected-access
+    assert (info.misses, info.hits) == (1, 9)
