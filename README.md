@@ -79,7 +79,8 @@ fish.status, fish.head, fish.tail, fish.mask_bbox   # frame pixels; abstentions 
 # Beats the SAM rule on reef length agreement; worse on pool fish models under the
 # per-fish p90 estimator -- see the module docstring before swapping it in.
 from fishsense_core.fish.headtail_keypoints import HeadTailKeypointDetector
-detector = HeadTailKeypointDetector.from_checkpoint("best_length.pt")
+from fishsense_core.models import HuggingFaceStore
+detector = HeadTailKeypointDetector.from_store(HuggingFaceStore(), cache_dir="/models")
 if fish.mask_bbox is not None:            # None on every abstention
     kp = detector.predict(rectified_bgr, fish.mask_bbox)
     kp.head, kp.tail, kp.confidence, kp.length_px

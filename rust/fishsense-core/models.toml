@@ -84,3 +84,23 @@ targets = ["server"]
 filename = "sam3.1_multiplex.pt"
 sha256 = "0567debeec80ba4ac6369540c6c248025283cb3ff2b92827509e57e2b3541cb6"
 size = 3502755717
+
+[[model]]
+# The SimCC snout/fork keypoint model (fishsense_core.fish.headtail_keypoints):
+# run `simcc_sam`, epoch 12, selected on validation-dive length before any test
+# prediction (UCSD-E4E/2026-10-22_headtail_keypoints). The repo also holds the
+# same weights as model.safetensors; core loads the .pt, the experiment's own
+# format, through torch's restricted unpickler.
+name = "headtail-keypoints"
+version = "simcc-sam-e12"
+default = true
+
+[model.origin.huggingface]
+repo = "ucsde4e/fishsense-headtail-keypoint"
+revision = "4a45ac41734662351a334f4992c6fede7ff859f0"
+
+[[model.artifact]]
+targets = ["server"]
+filename = "simcc_sam_best_length.pt"
+sha256 = "8918034a0f84f45eb2b8224a369781468ae63497ff06b009bed958ebb82b0110"
+size = 142032463

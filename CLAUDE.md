@@ -56,8 +56,9 @@ python/fishsense_core/
                                    #   cut by crop_from_box from FishAtDot.mask_bbox).
                                    #   Ported from 2026-10-22_headtail_keypoints; beats
                                    #   the SAM rule on reef length, loses on pool p90.
-                                   #   `[headtail-keypoints]` extra; checkpoint not in
-                                   #   models.toml yet (lives on the training host)
+                                   #   `[headtail-keypoints]` extra; checkpoint pinned as
+                                   #   headtail-keypoints/simcc-sam-e12 (public HF repo
+                                   #   ucsde4e/fishsense-headtail-keypoint)
     laser.py                       # calibrate_laser() wraps _native.laser.calibrate_laser;
                                    #   re-exports the line fit below
     line_fit.py                    # Per-dive 2-D RANSAC laser line + outlier flags (numpy).

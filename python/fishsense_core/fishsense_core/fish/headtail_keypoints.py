@@ -344,7 +344,9 @@ class HeadTailKeypoints:
 class HeadTailKeypointDetector:
     """The trained SimCC model, from a crop to snout and fork.
 
-    Build it with :meth:`from_store` (the pinned checkpoint, verified by hash)
+    Build it with :meth:`from_store` (the pinned checkpoint, verified by hash;
+    ``HuggingFaceStore()`` fetches it from the public
+    ``ucsde4e/fishsense-headtail-keypoint`` repo at its pinned commit)
     or :meth:`from_checkpoint`; then :meth:`predict` a frame given the fish's
     SAM mask box, or :meth:`predict_crops` crops already cut by
     :func:`crop_from_box`.

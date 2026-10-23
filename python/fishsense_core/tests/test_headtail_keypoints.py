@@ -428,12 +428,28 @@ def test_from_store_refuses_a_wrong_checkpoint(tmp_path, monkeypatch):
         )
 
 
-def test_the_checkpoint_is_not_in_the_shipped_manifest_yet(tmp_path):
-    """Pinned so adding the hash later is a deliberate, visible change: the
-    selected checkpoint (`simcc_sam`, epoch 12, `best_length.pt`) lives on
-    the training host and has not been hashed into models.toml."""
-    pytest.importorskip("fishsense_core._native")
-    with pytest.raises(KeyError, match=sut.MODEL_NAME):
+def test_the_checkpoint_is_pinned_in_the_shipped_manifest():
+    """The selected checkpoint (run `simcc_sam`, epoch 12), at the Hugging
+    Face commit it was published in. Measured from the Hub's LFS record and
+    checked against the file core downloaded and loaded (2026-10-23)."""
+    from fishsense_core import models  # pylint: disable=import-outside-toplevel
+
+    ref = models.builtin_manifest().resolve(sut.MODEL_NAME)
+    assert (ref.version, ref.filename) == ("simcc-sam-e12", "simcc_sam_best_length.pt")
+    assert ref.sha256 == "8918034a0f84f45eb2b8224a369781468ae63497ff06b009bed958ebb82b0110"
+    assert ref.size == 142032463
+    assert ref.origins["huggingface"] == {
+        "repo": "ucsde4e/fishsense-headtail-keypoint",
+        "revision": "4a45ac41734662351a334f4992c6fede7ff859f0",
+    }
+
+
+def test_an_offline_miss_does_not_reach_for_the_hub(tmp_path):
+    """store=None with a cold cache raises at once; the Hub is only used
+    when a caller hands over a HuggingFaceStore."""
+    from fishsense_core.models import ModelUnavailable  # pylint: disable=import-outside-toplevel
+
+    with pytest.raises(ModelUnavailable, match="headtail-keypoints/simcc-sam-e12"):
         HeadTailKeypointDetector.from_store(None, cache_dir=tmp_path)
 
 
