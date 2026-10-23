@@ -73,18 +73,18 @@ jobs:
       if: failure()
       run: cat "${FISHSENSE_HANG_DUMP}" 2>/dev/null || echo "(no hang dump — failure was not a watchdog timeout)"
 
-  # The torch-backed tests: the SAM 3.1 adapter's autocast and the keypoint
-  # model's lift, batching, network shape and checkpoint round trip. They skip
-  # wherever torch is absent, which is the base job above, so this job installs
-  # CPU torch + timm (the [headtail-keypoints] extra, from the CPU index so the
-  # runner is not asked for a CUDA runtime) and runs only the files that use
-  # them. Any skip here is a failure (both files skip only for want of torch or
-  # timm), so the step greps the skip summary. `shell: bash` is what turns on
-  # pipefail: the default `bash -e` takes the pipeline's status from `tee`, and
-  # a failing pytest would go green.
-  test-ubuntu-torch:
+  # Every extra at the version uv.lock pins, so a dependency bump (a
+  # Dependabot PR included) is tested against what the extras actually load:
+  # the laser detector, the slate mask, the denoiser, the SAM 3.1 adapter's
+  # autocast and the keypoint model all skip in the job above, which installs
+  # none of them. torch is the one substitution: the lock's
+  # PyPI wheel carries a CUDA runtime, so the job takes the same torch and
+  # torchvision versions from the CPU index instead. A test that skips for a
+  # missing module is a failure here; `shell: bash` turns on pipefail, so a
+  # failing pytest is not hidden behind tee.
+  test-ubuntu-extras:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     env:
       OPENBLAS_NUM_THREADS: "1"
       OMP_NUM_THREADS: "1"
@@ -95,15 +95,22 @@ jobs:
       uses: actions/setup-python@v5
       with:
         python-version: "3.13"
-    - name: Install dependencies
+    - name: Install the dev group, then every extra at its locked version
+      shell: bash
       run: |
         sudo apt-get update
         sudo apt-get install -y libopenblas-dev
         python -m pip install --upgrade pip uv
         uv sync --group dev
-        uv pip install --torch-backend=cpu torch timm
-    - name: Run the torch-backed tests
+        locked() { sed -n "/^name = \"$1\"\$/{n;s/^version = \"\(.*\)\"/\1/p}" uv.lock; }
+        TORCH=$(locked torch); TORCHVISION=$(locked torchvision)
+        test -n "$TORCH" && test -n "$TORCHVISION"
+        uv export --frozen --all-extras --group dev --no-hashes --no-emit-project --no-header \
+          | grep -vE '^\s*#|^(torch|torchvision|triton|nvidia-|cuda-)' > locked-extras.txt
+        uv pip install --torch-backend=cpu "torch==$TORCH" "torchvision==$TORCHVISION" -r locked-extras.txt
+        uv pip list | grep -iE '^(torch|torchvision|pillow|timm|segmentation-models-pytorch|bm3d|huggingface-hub) '
+    - name: Run the whole suite with the extras installed
       shell: bash
       run: |
-        uv run --no-sync pytest --timeout=300 -rs tests/test_headtail_keypoints.py tests/test_fish_at_dot.py | tee pytest.log
-        if grep -q "^SKIPPED" pytest.log; then echo "torch-backed tests skipped"; exit 1; fi
+        uv run --no-sync pytest --timeout=300 -rs | tee pytest.log
+        if grep -qE "could not import|not installed" pytest.log; then echo "a test skipped for a missing extra"; exit 1; fi
