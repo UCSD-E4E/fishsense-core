@@ -848,3 +848,273 @@ class TestSam3Segmenter:
         )
         assert batch.transfers == 1
         assert len(got) == 3 and all(m.shape == (5, 7) for m in got)
+
+
+# ── SAM's score as the gate ─────────────────────────────────────────────────
+#
+# The automatic chain gates on SAM's own confidence (paper §6.3): only masks
+# scoring at least the gate (fishsense-services' AUTOMATIC_SAM_SCORE_GATE,
+# 0.5) reach the laser gate, and the kept mask's score is recorded. Ported
+# from fishsense-services' tests/test_automatic_frames.py (`_Scored`,
+# `_Gated`, `ScoredSam3Adapter`).
+
+GATE = 0.5
+
+
+def _scored_mask_at(x, y, half_len=200, half_h=60):
+    ox, oy = crop_origin(*DOT, FRAME_W, FRAME_H, CROP_W, CROP_H)
+    return _fish_mask(int(x - ox), int(y - oy), half_len, half_h)
+
+
+class _Scored:
+    """A scored segmenter: (mask, score) pairs, crop-local. Its plain
+    `segment` must never be called when `segment_scored` exists."""
+
+    def __init__(self, pairs):
+        self.pairs = pairs
+        self.calls = 0
+
+    def segment(self, image):
+        raise AssertionError("segment called on a scored segmenter")
+
+    def segment_scored(self, image):
+        self.calls += 1
+        assert image.shape[:2] == (CROP_H, CROP_W)
+        return self.pairs
+
+
+class _WindowedScored(_Windowed):
+    def segment(self, image):
+        raise AssertionError("segment called on a scored segmenter")
+
+    def segment_scored(self, image):
+        self.shapes.append(image.shape[:2])
+        return self.answers[image.shape[:2]]
+
+
+def _gated(segmenter, dot=DOT, **kwargs):
+    kwargs.setdefault("score_gate", GATE)
+    return _find(_frame(), [dot], segmenter, **kwargs)
+
+
+class TestScoreGate:
+    def test_a_fish_at_the_dot_is_keypointed_with_its_score(self):
+        r = _gated(_Scored([(_scored_mask_at(*DOT), 0.81)]))
+
+        assert r.status == "predicted"
+        assert r.score == pytest.approx(0.81)
+        assert isinstance(r.score, float)
+        assert r.head[0] == pytest.approx(DOT[0], abs=260)
+        assert r.mask_bbox is not None
+
+    def test_a_mask_below_the_gate_is_not_kept(self):
+        r = _gated(_Scored([(_scored_mask_at(*DOT), 0.49)]))
+        assert r.status == "no_detections"
+        assert r.score is None and r.head is None and r.mask is None
+
+    def test_the_gate_is_inclusive(self):
+        r = _gated(_Scored([(_scored_mask_at(*DOT), 0.5)]))
+        assert r.status == "predicted" and r.score == pytest.approx(0.5)
+
+    def test_a_confident_fish_off_the_dot_does_not_count(self):
+        """The dot must be on the mask; a weak mask under it is not kept either."""
+        r = _gated(
+            _Scored(
+                [(_scored_mask_at(*DOT), 0.3), (_scored_mask_at(DOT[0] + 600, DOT[1]), 0.95)]
+            )
+        )
+        assert r.status == "laser_off_all_fish" and r.score is None
+
+    def test_the_kept_masks_score_is_the_one_under_the_dot(self):
+        r = _gated(
+            _Scored(
+                [(_scored_mask_at(DOT[0] + 600, DOT[1]), 0.95), (_scored_mask_at(*DOT), 0.7)]
+            )
+        )
+        assert r.status == "predicted" and r.score == pytest.approx(0.7)
+
+    def test_the_gate_runs_before_the_laser_gate(self):
+        """A weak mask first in order and under the dot must not shadow a
+        passing one under it too: the gate drops it before the first-hit rule."""
+        r = _gated(
+            _Scored([(_scored_mask_at(*DOT), 0.2), (_scored_mask_at(*DOT, half_len=300), 0.6)])
+        )
+        assert r.status == "predicted" and r.score == pytest.approx(0.6)
+        assert r.mask_area_px == int(np.count_nonzero(_scored_mask_at(*DOT, half_len=300)))
+
+    def test_an_unfittable_kept_mask_still_names_its_score(self):
+        r = _gated(_Scored([(_scored_mask_at(*DOT), 0.81)]), head_tail_detector=_Exploding())
+        assert r.status == "headtail_failed" and r.score == pytest.approx(0.81)
+
+    def test_without_a_gate_a_scored_segmenter_still_reports_its_score(self):
+        r = _find(_frame(), [DOT], _Scored([(_scored_mask_at(*DOT), 0.3)]))
+        assert r.status == "predicted" and r.score == pytest.approx(0.3)
+
+    def test_a_plain_segmenter_scores_nothing_and_is_unchanged(self):
+        r = _find(_frame(), [DOT], _Stub([_scored_mask_at(*DOT)]))
+        assert r.status == "predicted" and r.score is None
+
+    def test_a_gate_on_a_segmenter_with_no_scores_raises(self):
+        with pytest.raises(TypeError, match="segment_scored"):
+            _gated(_Stub([_scored_mask_at(*DOT)]))
+
+    def test_a_gate_on_an_unscored_mask_raises(self):
+        with pytest.raises(ValueError, match="unscored"):
+            _gated(_Scored([(_scored_mask_at(*DOT), None)]))
+
+    def test_the_score_survives_equality_and_hashing(self):
+        a = _gated(_Scored([(_scored_mask_at(*DOT), 0.81)]))
+        b = _gated(_Scored([(_scored_mask_at(*DOT), 0.81)]))
+        c = _gated(_Scored([(_scored_mask_at(*DOT), 0.82)]))
+        assert a == b and hash(a) == hash(b)
+        assert a != c
+
+
+class TestScoreGateWithGrowCutMasks:
+    def test_a_fish_longer_than_the_window_is_measured_on_the_whole_frame(self):
+        seg = _WindowedScored([(_window_of(LONG_FISH), 0.93)], [(LONG_FISH, 0.88)])
+
+        r = _gated(seg, grow_cut_masks=True)
+
+        assert seg.shapes == [(CROP_H, CROP_W), (FRAME_H, FRAME_W)]
+        assert r.status == "predicted"
+        assert (r.crop_x, r.crop_y) == (0, 0)
+        assert r.mask_bbox[0] <= DOT[0] - 1290 and r.mask_bbox[2] >= DOT[0] + 1290
+        ends = sorted((r.head[0], r.tail[0]))
+        assert ends[0] == pytest.approx(DOT[0] - 1300, abs=30)
+        assert ends[1] == pytest.approx(DOT[0] + 1300, abs=30)
+        assert r.score == pytest.approx(0.88)  # the whole frame's mask's
+
+    def test_a_fish_inside_the_window_is_segmented_once(self):
+        fish = _fish_in_frame(*DOT, half_len=500)
+        seg = _WindowedScored([(_window_of(fish), 0.9)], [])
+
+        r = _gated(seg, grow_cut_masks=True)
+
+        assert seg.shapes == [(CROP_H, CROP_W)]
+        assert r.status == "predicted" and r.score == pytest.approx(0.9)
+        assert (r.crop_x, r.crop_y) == crop_origin(*DOT, FRAME_W, FRAME_H, CROP_W, CROP_H)
+
+    def test_a_mask_cut_only_by_the_frames_own_edge_is_not_segmented_again(self):
+        dot = (300.0, 1500.0)
+        fish = _fish_in_frame(150, 1500, half_len=600)  # runs off the left edge
+        seg = _WindowedScored([(_window_of(fish, dot), 0.9)], [])
+
+        r = _gated(seg, dot=dot, grow_cut_masks=True)
+
+        assert seg.shapes == [(CROP_H, CROP_W)]
+        assert r.status == "predicted" and r.crop_x == 0
+
+    def test_a_cut_fish_the_whole_frame_puts_no_mask_under_the_dot_abstains(self):
+        elsewhere = _fish_in_frame(DOT[0] + 1500, 400, half_len=300)
+        seg = _WindowedScored([(_window_of(LONG_FISH), 0.93)], [(elsewhere, 0.9)])
+
+        r = _gated(seg, grow_cut_masks=True)
+
+        assert r.status == "laser_off_all_fish"
+        assert r.head is None and r.score is None
+
+    def test_a_cut_fish_whose_whole_frame_mask_fails_the_gate_is_no_detection(self):
+        seg = _WindowedScored([(_window_of(LONG_FISH), 0.93)], [(LONG_FISH, 0.4)])
+
+        r = _gated(seg, grow_cut_masks=True)
+
+        assert r.status == "no_detections" and r.score is None
+
+
+class TestSam3SegmenterScores:
+    """`ScoredSam3Adapter.segment_scored`'s contract, on core's adapter."""
+
+    @pytest.fixture(autouse=True)
+    def _torch(self):
+        self.torch = pytest.importorskip("torch")
+
+    @staticmethod
+    def _processor_returning(state_items):
+        class _Processor:
+            def set_image(self, _image):
+                return {}
+
+            def set_text_prompt(self, _prompt, state):
+                state.update(state_items)
+                return state
+
+        return _Processor()
+
+    def _scored(self, **state_items):
+        return Sam3Segmenter(self._processor_returning(state_items)).segment_scored(
+            np.zeros((5, 7, 3), dtype=np.uint8)
+        )
+
+    def test_masks_come_with_their_scores_in_order(self):
+        got = self._scored(
+            masks=[np.zeros((1, 5, 7)), np.ones((1, 5, 7))],
+            scores=self.torch.tensor([0.9, 0.4]),
+        )
+        assert [m.shape for m, _ in got] == [(5, 7), (5, 7)]
+        assert [s for _, s in got] == pytest.approx([0.9, 0.4])
+        assert all(isinstance(s, float) for _, s in got)
+
+    def test_bfloat16_scores_are_read(self):
+        """numpy has no bfloat16: the scores are cast before crossing."""
+        got = self._scored(
+            masks=[np.zeros((1, 5, 7))],
+            scores=self.torch.tensor([0.75], dtype=self.torch.bfloat16),
+        )
+        assert got[0][1] == pytest.approx(0.75)
+
+    def test_a_batch_score_tensor_crosses_to_the_host_once(self):
+        class _Batch:
+            def __init__(self, data):
+                self._data = data
+                self.transfers = 0
+
+            def float(self):
+                return self
+
+            def detach(self):
+                return self
+
+            def cpu(self):
+                self.transfers += 1
+                return self._data
+
+            def __iter__(self):
+                raise AssertionError("iterated on the device")
+
+        scores = _Batch(np.array([0.9, 0.8, 0.7]))
+        got = self._scored(masks=np.ones((3, 1, 5, 7)), scores=scores)
+        assert scores.transfers == 1
+        assert [s for _, s in got] == pytest.approx([0.9, 0.8, 0.7])
+
+    def test_no_scores_means_none_and_segment_is_unchanged(self):
+        masks = [np.zeros((1, 5, 7))]
+        assert [s for _, s in self._scored(masks=masks)] == [None]
+        got = Sam3Segmenter(self._processor_returning({"masks": masks})).segment(
+            np.zeros((5, 7, 3), dtype=np.uint8)
+        )
+        assert len(got) == 1 and got[0].shape == (5, 7)
+
+    def test_no_masks_is_empty(self):
+        assert not self._scored()
+
+    def test_a_score_count_that_does_not_match_the_masks_raises(self):
+        with pytest.raises(ValueError, match="2 masks but 1 scores"):
+            self._scored(
+                masks=[np.zeros((1, 5, 7)), np.zeros((1, 5, 7))],
+                scores=self.torch.tensor([0.9]),
+            )
+
+    def test_the_kernel_gates_on_sams_scores(self):
+        """End to end through the adapter: a weak SAM mask under the dot is
+        dropped, a passing one is kept with its score."""
+        weak = _fish_mask(100, 100)[None]
+        strong = _fish_mask(100, 100, half_len=150)[None]
+        seg = Sam3Segmenter(
+            self._processor_returning(
+                {"masks": [weak, strong], "scores": self.torch.tensor([0.3, 0.8])}
+            )
+        )
+        r = _find(_frame(), [(100.0, 100.0)], seg, score_gate=GATE)
+        assert r.status == "predicted" and r.score == pytest.approx(0.8)
+        assert r.mask_area_px == int(np.count_nonzero(strong))
