@@ -35,7 +35,7 @@ from typing import List, Sequence, Tuple
 import cv2
 import numpy as np
 
-from fishsense_core.plane import Plane, plane_from_pose
+from fishsense_core.plane import Plane, plane_from_pose, pose_from_correspondences
 
 # cv2 is a C extension pylint cannot introspect; matches the convention in the
 # image modules. The many-argument OpenCV pipeline stages and the module length
@@ -759,15 +759,14 @@ def estimate_plane(
     template_pts = np.asarray(template_points, dtype=float).reshape(-1, 1, 2)
     image_points = cv2.perspectiveTransform(template_pts, homography).reshape(-1, 2)
 
-    body = np.zeros((len(template_pts), 3), dtype=np.float32)
-    body[:, :2] = (np.asarray(template_points, dtype=float) / float(dpi)) * INCH_TO_M
-
-    ok, rvec, tvec = cv2.solvePnP(
-        body, image_points.astype(np.float64),
-        np.asarray(camera_matrix, dtype=float), np.zeros((5,))
-    )
-    if not ok:
+    body_m = (np.asarray(template_points, dtype=float) / float(dpi)) * INCH_TO_M
+    pose = pose_from_correspondences(body_m, image_points, camera_matrix)
+    if pose is None:
         return None
+    rvec, tvec = pose
+    # The same float32 body the solve used, for the residual below.
+    body = np.zeros((len(body_m), 3), dtype=np.float32)
+    body[:, :2] = body_m
 
     rotation, _ = cv2.Rodrigues(rvec)
     projected, _ = cv2.projectPoints(
