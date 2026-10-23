@@ -155,7 +155,19 @@ def test_sam3_without_a_gpu_fails_before_downloading(tmp_path, fake_sam3):
         )
 
 
-def test_sam3_is_not_in_the_shipped_manifest_yet(tmp_path, fake_sam3):
-    # Pinned so adding the hash later is a deliberate, visible change.
-    with pytest.raises(KeyError, match="sam3"):
+def test_sam3_is_pinned_in_the_shipped_manifest():
+    """`sam3.1_multiplex.pt`, the checkpoint fishsense-detector pins and
+    production runs -- not `sam3.pt`, which loads just as quietly and
+    degrades every mask. Measured on the file itself (2026-10-22)."""
+    ref = models.builtin_manifest().resolve(sam3_loader.SAM3_MODEL_NAME)
+    assert (ref.version, ref.filename) == ("3.1", "sam3.1_multiplex.pt")
+    assert ref.sha256 == "0567debeec80ba4ac6369540c6c248025283cb3ff2b92827509e57e2b3541cb6"
+    assert ref.size == 3502755717
+    assert "huggingface" not in ref.origins, "facebook/sam3.1 is gated; no public origin"
+
+
+def test_sam3_offline_miss_is_unavailable_not_a_download(tmp_path, fake_sam3):
+    """With no store, a cold cache raises at once rather than reaching for
+    the network: there is no public origin to reach for anyway."""
+    with pytest.raises(models.ModelUnavailable, match="sam3/3.1"):
         sam3_loader.load_segmenter(None, cache_dir=tmp_path)

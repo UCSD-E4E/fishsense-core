@@ -75,8 +75,9 @@ jobs:
 
   # Every extra at the version uv.lock pins, so a dependency bump (a
   # Dependabot PR included) is tested against what the extras actually load:
-  # the laser detector, the slate mask and the denoiser skip in the job above,
-  # which installs none of them. torch is the one substitution: the lock's
+  # the laser detector, the slate mask, the denoiser, the SAM 3.1 adapter's
+  # autocast and the keypoint model all skip in the job above, which installs
+  # none of them. torch is the one substitution: the lock's
   # PyPI wheel carries a CUDA runtime, so the job takes the same torch and
   # torchvision versions from the CPU index instead. A test that skips for a
   # missing module is a failure here; `shell: bash` turns on pipefail, so a
@@ -112,4 +113,4 @@ jobs:
       shell: bash
       run: |
         uv run --no-sync pytest --timeout=300 -rs | tee pytest.log
-        if grep -q "could not import" pytest.log; then echo "a test skipped for a missing extra"; exit 1; fi
+        if grep -qE "could not import|not installed" pytest.log; then echo "a test skipped for a missing extra"; exit 1; fi

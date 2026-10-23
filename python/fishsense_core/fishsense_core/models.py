@@ -194,15 +194,14 @@ class LocalDirStore:  # pylint: disable=too-few-public-methods
 
 def _hf_hub_download() -> Any:
     """``huggingface_hub.hf_hub_download``, imported only when used."""
-    try:
-        # pylint: disable-next=import-outside-toplevel
-        from huggingface_hub import hf_hub_download
-    except ImportError as exc:  # pragma: no cover - depends on extras
-        raise ImportError(
-            "HuggingFaceStore requires huggingface_hub. Install the optional "
-            "extra: pip install 'fishsense_core[laser-detector]'"
-        ) from exc
-    return hf_hub_download
+    # pylint: disable-next=import-outside-toplevel
+    from fishsense_core._optional import require
+
+    # Every extra whose models are published on the Hub declares it.
+    hub = require(
+        "huggingface_hub", ("headtail-keypoints", "laser-detector", "slate"), "HuggingFaceStore"
+    )
+    return hub.hf_hub_download
 
 
 class HuggingFaceStore:  # pylint: disable=too-few-public-methods

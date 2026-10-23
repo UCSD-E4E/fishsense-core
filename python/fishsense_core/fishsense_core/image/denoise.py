@@ -123,18 +123,18 @@ def _import_bm3d():
     ``np.trapezoid``. Same function, new name; the alias is restored before
     import so the package loads on this NumPy.
     """
+    # pylint: disable-next=import-outside-toplevel
+    from fishsense_core._optional import require
+
     if not hasattr(np, "trapz"):
         np.trapz = np.trapezoid  # type: ignore[attr-defined]
-    try:
-        import bm3d  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
-    except ImportError as exc:  # pragma: no cover - depends on install extras
-        raise ImportError(
-            "BM3D denoising requires the `bm3d` package, which is not a base "
-            "dependency: it costs 15-36x the entire decode and nothing here "
-            "enables it by default. Install the extra: "
-            "pip install 'fishsense_core[denoise]'."
-        ) from exc
-    return bm3d
+    return require(
+        "bm3d",
+        "denoise",
+        "BM3D denoising",
+        why="It is not a base dependency: it costs 15-36x the entire decode "
+        "and nothing here enables it by default.",
+    )
 
 
 @dataclass(frozen=True)

@@ -313,6 +313,8 @@ mod tests {
         assert!(m.resolve("fishial", None, Target::Server).is_ok());
         assert!(m.resolve("fishial", None, Target::MobileCoreml).is_ok());
         assert!(m.resolve("laser-detector", None, Target::Server).is_ok());
+        assert!(m.resolve("sam3", None, Target::Server).is_ok());
+        assert!(m.resolve("headtail-keypoints", None, Target::Server).is_ok());
     }
 
     #[test]

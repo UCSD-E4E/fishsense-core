@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, Any
 import cv2
 import numpy as np
 
+from fishsense_core._optional import require
 from fishsense_core.camera_intrinsics import CameraIntrinsics
 from fishsense_core.models import Manifest, WeightStore, builtin_manifest, fetch
 
@@ -144,16 +145,8 @@ DEFAULT_DECODER_INTERPOLATION = "nearest"
 DEFAULT_PRESENCE_HIDDEN = 128
 
 
-def _require_torch() -> Any:
-    """Import torch, or raise with an actionable message."""
-    try:
-        import torch  # noqa: PLC0415 - optional heavy dependency
-    except ImportError as exc:  # pragma: no cover - depends on install extras
-        raise ImportError(
-            "The laser detector requires PyTorch. Install the optional extra: "
-            "pip install 'fishsense_core[laser-detector]'"
-        ) from exc
-    return torch
+_EXTRA = "laser-detector"
+_FEATURE = "The laser detector"
 
 
 # --------------------------------------------------------------------------
@@ -459,6 +452,31 @@ def rectify_prediction(
     return float(out[0, 0, 0]), float(out[0, 0, 1])
 
 
+def unrectify_prediction(
+    rect_x: float, rect_y: float, k: np.ndarray, dist: np.ndarray
+) -> tuple[float, float]:
+    """Rectified (undistorted) pixel space → raw pixel space: the inverse of
+    :func:`rectify_prediction`, kept beside it so the two stay one transform.
+
+    Undo K, apply the distortion polynomial, reapply K
+    (``cv2.projectPoints`` of the normalised ray). Accepts K as ``(3, 3)``
+    or flat ``(9,)``, as the forward map does. It runs in float64 where the
+    forward map runs in float32 (that is the detector's own precision, and
+    changing it would move every rectified prediction); a round trip
+    therefore agrees to well under a pixel, not bit for bit.
+    """
+    k = np.asarray(k, dtype=np.float64).reshape(3, 3)
+    d = np.asarray(dist, dtype=np.float64).reshape(1, -1)
+    normalized = cv2.undistortPoints(  # pylint: disable=no-member
+        np.array([[[float(rect_x), float(rect_y)]]], dtype=np.float64), k, None
+    ).reshape(1, 2)
+    points_3d = np.hstack([normalized, np.ones((1, 1), dtype=np.float64)])
+    projected, _ = cv2.projectPoints(  # pylint: disable=no-member
+        points_3d, np.zeros(3), np.zeros(3), k, d
+    )
+    return float(projected[0, 0, 0]), float(projected[0, 0, 1])
+
+
 # --------------------------------------------------------------------------
 # Result type
 # --------------------------------------------------------------------------
@@ -496,14 +514,8 @@ def _build_module(encoder_name: str, in_channels: int, decoder_interpolation: st
     Structurally identical to ``laser_detector.model.LaserDetector`` so that
     published checkpoints load with ``strict=True``.
     """
-    torch = _require_torch()
-    try:
-        import segmentation_models_pytorch as smp  # noqa: PLC0415
-    except ImportError as exc:  # pragma: no cover - depends on install extras
-        raise ImportError(
-            "The laser detector requires segmentation-models-pytorch. Install "
-            "the optional extra: pip install 'fishsense_core[laser-detector]'"
-        ) from exc
+    torch = require("torch", _EXTRA, _FEATURE)
+    smp = require("segmentation_models_pytorch", _EXTRA, _FEATURE)
 
     # pylint: disable-next=import-outside-toplevel
     from torch import nn
@@ -624,7 +636,7 @@ class LaserDetector:
         checkpoint_name: str | None = None,
         camera_intrinsics: "dict[int, CameraIntrinsics] | None" = None,
     ):
-        torch = _require_torch()
+        torch = require("torch", _EXTRA, _FEATURE)
         self._torch = torch
         # Per-camera intrinsics for output rectification, keyed by camera_id.
         # Populate via register_camera_intrinsics() or this kwarg; consumed only
@@ -698,7 +710,7 @@ class LaserDetector:
             ValueError: If the checkpoint is not a recognized published one and
                 ``encoder_name`` or ``bias_offset`` was not supplied.
         """
-        torch = _require_torch()
+        torch = require("torch", _EXTRA, _FEATURE)
         path = Path(path)
         checkpoint = torch.load(path, map_location="cpu", weights_only=False)
         cfg = checkpoint.get("cfg") or {}
@@ -769,15 +781,7 @@ class LaserDetector:
             revision: Git revision to pin.
             device: Torch device; defaults to CUDA when available.
         """
-        try:
-            # pylint: disable-next=import-outside-toplevel
-            from huggingface_hub import hf_hub_download
-        except ImportError as exc:  # pragma: no cover - depends on extras
-            raise ImportError(
-                "from_pretrained requires huggingface_hub. Install the "
-                "optional extra: pip install 'fishsense_core[laser-detector]'"
-            ) from exc
-
+        hf_hub_download = require("huggingface_hub", _EXTRA, "from_pretrained").hf_hub_download
         path = hf_hub_download(repo_id, filename, revision=revision)
         return cls.from_checkpoint(path, device=device, **kwargs)
 

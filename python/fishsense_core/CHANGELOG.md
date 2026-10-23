@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.2.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v4.1.0...fishsense_core-v4.2.0) (2026-10-23)
+
+
+### Features
+
+* **fish:** the SAM 3.1 head/tail stage, and SAM 3.1 pinned in the manifest ([#89](https://github.com/UCSD-E4E/fishsense-core/issues/89)) ([82ece99](https://github.com/UCSD-E4E/fishsense-core/commit/82ece99b602c657b997e320a3b8ae19159b5eeaf))
+* **fish:** the SimCC snout/fork keypoint model, on the SAM-box crop ([#90](https://github.com/UCSD-E4E/fishsense-core/issues/90)) ([f5daad7](https://github.com/UCSD-E4E/fishsense-core/commit/f5daad75eede3b5db70b36d3b71e2a01121e95b7))
+
 ## [4.1.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense_core-v4.0.0...fishsense_core-v4.1.0) (2026-09-26)
 
 
