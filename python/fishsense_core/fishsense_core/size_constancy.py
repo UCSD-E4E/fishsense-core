@@ -1,18 +1,23 @@
 """Label-free laser calibration by size constancy -- no slate size, no labels.
 
-Ported from fishsense-services v0.48.0
-`services/fishsense-services-processor/src/fishsense_services_processor/
-automatic_results/size_constancy.py`, unchanged but for this paragraph and the
-one on the shadow copy below. Its own provenance follows.
+This replaces :func:`fishsense_core.laser.calibrate_laser`'s input when there
+are no labelled 3-D points: it fits the beam from the detector's dots and the
+apparent size of whatever rigid object the dot is on.
 
-Ported from cscw-fishsense2027@96a8da07 calibration_analysis/e1j_size_constancy/
-register.py (`pair_scale`; `score`'s weighted solve, its one robust pass and
-its connectivity rule) and slate_unknown.py (`frame`, `fit_tv`); the beam is
-built as e2e_measurement/score.py `calibrations()` builds its label-free one.
-The method is wuwnet-fishsense2026@5532b99 fishsense_wuwnet/laser.py
-(`close_with_apparent_size`); the paper is cscw PAPER.md §4.3. fishsense-core
-4.1.0 has none of it (its `laser.calibrate_laser` fits a line through known 3-D
-points, which is what this replaces).
+Provenance: ported from fishsense-services v0.48.0
+`services/fishsense-services-processor/src/fishsense_services_processor/
+automatic_results/size_constancy.py`, which ported cscw-fishsense2027@96a8da07
+calibration_analysis/e1j_size_constancy/register.py (`pair_scale`; `score`'s
+weighted solve, its one robust pass and its connectivity rule) and
+slate_unknown.py (`frame`, `fit_tv`), with the beam built as e2e_measurement/
+score.py `calibrations()` builds its label-free one. The method is
+wuwnet-fishsense2026@5532b99 fishsense_wuwnet/laser.py
+(`close_with_apparent_size`); the paper is cscw PAPER.md §4.3. Where core
+departs from that port it says so below, under **Departures**.
+
+It is NumPy, SciPy and OpenCV (SIFT, RANSAC), not Rust: the registration is
+OpenCV's, and the only consumers are server-side. Mobile measures from a
+depth map and has no use for it.
 
 **The idea.** A dot at range Z sits at ``t = t_v + A / Z`` along the dive's
 laser line, and a rigid object the dot is on appears with size ``s ∝ 1/Z``. So
@@ -29,13 +34,13 @@ dot is on the object by construction); its local scale at the dot is the size
 ratio. A weighted least-squares solve over all pairs gives each frame's log
 size up to one constant, after dropping pairs inconsistent with the rest.
 
-What v2 changes, and only where it must:
+What the services port changed from cscw, all kept here:
 
-* **the features come from the rectified frame** (the head/tail stage's JPEG,
-  `extract_features`), where cscw read the raw at half size through rawpy.
-  Both are halved, CLAHE-equalised greys with the same mask, detector and
-  matcher; the dot is in rectified pixels in both, so v2's features and dot now
-  share one space (cscw's were ~ a lens distortion apart);
+* **the features come from the rectified frame** (`extract_features`), where
+  cscw read the raw at half size through rawpy. Both are halved,
+  CLAHE-equalised greys with the same mask, detector and matcher; the dot is
+  in rectified pixels in both, so features and dot share one space (cscw's
+  were ~ a lens distortion apart);
 * **refusals** (`fit_label_free`), which cscw left to the reader: too few
   frames (`MIN_FRAMES`, slate_unknown's), too few matched pairs (register's
   "only N matched pairs" skip), too little range spread (`MIN_SIZE_RATIO`, the
@@ -52,11 +57,28 @@ What v2 changes, and only where it must:
   the others (`deleted_residuals`), so a wrong frame cannot shape the fit it
   is judged by -- setting the bracket, pinning the optimum, pushing good
   frames out first -- and after each drop the sizes are re-solved from the
-  kept frames' own pairs, so the dropped frame's pairs no longer shape them
-  (review of #136). The pairs already have their own loop check
-  (`solve_log_sizes`); this is the same idea a level up. A fit pinned at the
-  bracket after the trim is refused (``unconstrained``), and so is one the
-  trim leaves too few frames when it was pinned before it.
+  kept frames' own pairs, so the dropped frame's pairs no longer shape them.
+  The pairs already have their own loop check (`solve_log_sizes`); this is
+  the same idea a level up. A fit pinned at the bracket after the trim is
+  refused (``unconstrained``), and so is one the trim leaves too few frames
+  when it was pinned before it.
+
+**Departures** from the services port, each a case it got wrong:
+
+* **One connected component.** A frame had a size if *any* pair touched it,
+  so two clusters of frames that never matched each other were sized
+  relative to each other by the arbitrary gauge alone, and fitted. Now only
+  the largest connected component of the pair graph has sizes, and that
+  graph is taken **after** the robust pass, so a frame whose only pairs were
+  dropped has no size rather than a made-up one. When the graph is one
+  component (every dive the services fixtures cover) the solve is unchanged.
+* **A malformed pair is an error** (`near` < 1, a non-finite scale, an index
+  out of range or a self-pair), where `near` = 0 used to turn every residual
+  into NaN and silently zero every size.
+* **With no dive line, the direction follows the trim.** It came from every
+  frame before the trim and was never recomputed, so the frame the trim
+  dropped still tilted it; now it is refitted from the kept frames and the
+  trim repeated until the kept set stops changing.
 
 **The shadow copy.** fishsense-services v0.48.0 also carries
 `shadow_calibration/fit.py`, a port of cscw-fishsense2027@8312780a
@@ -197,9 +219,6 @@ class LabelFreeFit:  # pylint: disable=too-many-instance-attributes
     se_px: Optional[float]
     pair_residual_sd: Optional[float]
     o_mag_m: float
-    #: The length scale's predicted SD from dot and size noise (calibration
-    #: v3 on SAM sizes, 2026-10-23); None where not predicted.
-    scale_sd: Optional[float] = None
 
 
 def extract_features(image_bgr: np.ndarray, dot: Sequence[float]) -> FrameFeatures:
@@ -264,18 +283,14 @@ def pair_scale(  # pylint: disable=too-many-locals
         )
         if m is None or inl.sum() < MIN_INLIERS:
             break
-        h = np.vstack([m, [0, 0, 1]])
         inl = inl.ravel().astype(bool)
         hull = cv2.convexHull(pa[inl].astype(np.float32))
         inside = cv2.pointPolygonTest(hull, (x, y), True)
-        w = h[2, 0] * x + h[2, 1] * y + h[2, 2]
-        u = (h[0, 0] * x + h[0, 1] * y + h[0, 2]) / w
-        v = (h[1, 0] * x + h[1, 1] * y + h[1, 2]) / w
-        jac = np.array([[h[0, 0] - u * h[2, 0], h[0, 1] - u * h[2, 1]],
-                        [h[1, 0] - v * h[2, 0], h[1, 1] - v * h[2, 1]]]) / w  # fmt: skip
-        det = np.linalg.det(jac)
+        # A similarity (estimateAffinePartial2D) is affine: its Jacobian is
+        # its linear part everywhere, so the local scale needs no point.
+        det = np.linalg.det(m[:, :2])
         near = int((np.hypot(*(pa[inl] - (x, y)).T) < NEAR_PX).sum())
-        log_scale = float(0.5 * np.log(abs(det))) if det > 0 else np.nan
+        log_scale = float(0.5 * np.log(det)) if det > 0 else np.nan
         if np.isfinite(log_scale) and inside > 0 and (
             best is None or near > best[1]  # pylint: disable=unsubscriptable-object
         ):
@@ -300,6 +315,58 @@ def pair_scales(features: Sequence[FrameFeatures], dots: np.ndarray) -> list[Pai
     return out
 
 
+def _check_pairs(n: int, pairs: Sequence[PairScale]) -> None:
+    """A pair the solve cannot weigh or place is the caller's error."""
+    for p in pairs:
+        if not (0 <= p.i < n and 0 <= p.j < n) or p.i == p.j:
+            raise ValueError(f"pair ({p.i}, {p.j}) is not two distinct frames of {n}")
+        if not p.near >= 1:
+            raise ValueError(
+                f"pair ({p.i}, {p.j}) has near={p.near}: its weight sqrt(near) must be "
+                "positive (pair_scales keeps only pairs with MIN_PAIR_NEAR or more)"
+            )
+        if not np.isfinite(p.log_scale):
+            raise ValueError(f"pair ({p.i}, {p.j}) has a non-finite log_scale {p.log_scale}")
+
+
+def _largest_component(n: int, edges: Sequence[tuple[int, int]]) -> np.ndarray:
+    """Boolean mask of the largest connected component of the pair graph
+    (ties to the one holding the lowest frame); a frame no edge touches is in
+    none."""
+    parent = list(range(n))
+
+    def root(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    touched = np.zeros(n, bool)
+    for i, j in edges:
+        touched[i] = touched[j] = True
+        parent[root(i)] = root(j)
+    roots = np.array([root(k) for k in range(n)])
+    best, best_size = None, 0
+    for k in range(n):
+        if touched[k]:
+            size = int((roots == roots[k]).sum())
+            if size > best_size:
+                best, best_size = roots[k], size
+    return (roots == best) & touched if best is not None else touched
+
+
+def _weighted_solve(n: int, pairs: Sequence[PairScale], members: np.ndarray):
+    """Least-squares log sizes over ``members`` from the pairs among them,
+    rows weighted by ``sqrt(near)``, gauge ``mean log s = 0`` over them."""
+    rows = np.zeros((len(pairs), n))
+    for k, p in enumerate(pairs):
+        rows[k, p.j], rows[k, p.i] = 1, -1
+    w = np.sqrt([p.near for p in pairs])
+    a = np.vstack([rows * w[:, None], members.astype(float)])
+    b = np.append(np.array([p.log_scale for p in pairs]) * w, 0.0)
+    return a, b, w
+
+
 def solve_log_sizes(n: int, pairs: Sequence[PairScale]) -> LogSizes:
     """Per-frame log sizes from pairwise ratios (register.score).
 
@@ -307,23 +374,38 @@ def solve_log_sizes(n: int, pairs: Sequence[PairScale]) -> LogSizes:
     (another layer that passed the selection) disagrees with the loop of other
     pairs through the same frames: one pass drops pairs beyond 4 robust SDs,
     the SD floored at 1 % of scale so an almost-perfect majority cannot
-    shrink the tolerance until everything is rejected; then re-solve."""
+    shrink the tolerance until everything is rejected; then re-solve.
+
+    Only frames in the **largest connected component of the pairs the robust
+    pass kept** are ``connected``, and the re-solve is over them alone: a
+    frame in another component, or whose only pairs were dropped, has no
+    size relative to the rest, so it gets none (its entry is NaN) rather
+    than one the gauge made up. With every frame in one component this is
+    the services port's solve exactly.
+
+    Raises:
+        ValueError: A pair with ``near`` < 1, a non-finite ``log_scale``, or
+            indices that are not two distinct frames in ``range(n)``.
+    """
+    _check_pairs(n, pairs)
     if not pairs:
-        return LogSizes(np.zeros(n), np.zeros(n, bool), float("nan"))
-    rows = np.zeros((len(pairs), n))
-    for k, p in enumerate(pairs):
-        rows[k, p.j], rows[k, p.i] = 1, -1
-    w = np.sqrt([p.near for p in pairs])
-    a = np.vstack([rows * w[:, None], np.ones(n)])
-    b = np.append(np.array([p.log_scale for p in pairs]) * w, 0.0)
+        return LogSizes(np.full(n, np.nan), np.zeros(n, bool), float("nan"))
+    a, b, w = _weighted_solve(n, pairs, np.ones(n, bool))
     logs = np.linalg.lstsq(a, b, rcond=None)[0]
     r = (a[:-1] @ logs - b[:-1]) / w
     mad = max(1.4826 * np.median(np.abs(r - np.median(r))), 0.01)
-    keep = np.append(np.abs(r) <= 4 * mad, True)
-    logs = np.linalg.lstsq(a[keep], b[keep], rcond=None)[0]
-    resid = (a[:-1] @ logs - b[:-1]) / w
-    connected = np.abs(a[:-1]).sum(0) > 0
-    return LogSizes(logs, connected, float(resid.std()))
+    kept = [p for p, ok in zip(pairs, np.abs(r) <= 4 * mad) if ok]
+    connected = _largest_component(n, [(p.i, p.j) for p in kept])
+    own = [p for p in kept if connected[p.i] and connected[p.j]]
+    a, b, w = _weighted_solve(n, own, connected)
+    logs = np.linalg.lstsq(a, b, rcond=None)[0]
+    logs[~connected] = np.nan
+    # Residual SD over every pair whose frames both have sizes, as before.
+    sized = [k for k, p in enumerate(pairs) if connected[p.i] and connected[p.j]]
+    resid = np.array(
+        [(logs[pairs[k].j] - logs[pairs[k].i]) - pairs[k].log_scale for k in sized]
+    )
+    return LogSizes(logs, connected, float(resid.std()) if len(resid) else float("nan"))
 
 
 def line_direction(line: Optional[Sequence[float]], dots: np.ndarray) -> np.ndarray:
@@ -456,12 +538,12 @@ def _pinned(t: np.ndarray, tv: float) -> bool:
     return tv > hi - _AT_BOUND_PX or tv < hi - _BRACKET_PX + _AT_BOUND_PX
 
 
-def _refused(reason: str, **seen) -> LabelFreeFit:
+def _refused(reason: str, o_mag_m: float, **seen) -> LabelFreeFit:
     fields = {
         "laser_position": None, "laser_axis": None, "vanishing_px": None,
         "line_direction": None, "line_offset_px": None, "used": [],
         "frames_used": 0, "pairs": 0, "size_ratio": None, "se_px": None,
-        "pair_residual_sd": None, "o_mag_m": O_DESIGN_M,
+        "pair_residual_sd": None, "o_mag_m": o_mag_m,
     }  # fmt: skip
     fields.update(seen)
     return LabelFreeFit(outcome="refused", refusal_reason=reason, **fields)
@@ -488,7 +570,7 @@ def fit_label_free(
     or an optimum at the search bracket's edge."""
     dots = np.asarray(dots, float).reshape(-1, 2)
     if len(pairs) < len(dots) or not pairs:
-        return _refused("too_few_matched_pairs", pairs=len(pairs))
+        return _refused("too_few_matched_pairs", o_mag_m, pairs=len(pairs))
     sizes = solve_log_sizes(len(dots), pairs)
     used = np.flatnonzero(sizes.connected)
     seen = {
@@ -498,20 +580,34 @@ def fit_label_free(
         "pair_residual_sd": sizes.residual_sd,
     }
     if len(used) < min_frames:
-        return _refused("too_few_frames", **seen)
+        return _refused("too_few_frames", o_mag_m, **seen)
     s = np.exp(sizes.log_sizes[used])
     seen["size_ratio"] = float(s.max() / s.min())
     if seen["size_ratio"] < min_size_ratio:
-        return _refused("too_little_range_spread", **seen)
+        return _refused("too_little_range_spread", o_mag_m, **seen)
     u = line_direction(line, dots[used])
     pinned = _pinned(dots[used] @ u, fit_vanishing_position(dots[used] @ u, s))
-    used, s = trim_frames(dots @ u, pairs, used, s)
+    start, start_s = used, s
+    used, s = trim_frames(dots @ u, pairs, start, start_s)
+    if line is None:
+        # The direction came from every frame, the one the trim dropped
+        # included: refit it from the kept frames and trim again from the
+        # start until the kept set stops changing (a few rounds at most; each
+        # round can only drop frames the previous direction kept).
+        for _ in range(len(start)):
+            u = line_direction(None, dots[used])
+            again, again_s = trim_frames(dots @ u, pairs, start, start_s)
+            if np.array_equal(again, used):
+                break
+            used, s = again, again_s
+        else:
+            u = line_direction(None, dots[used])
     seen.update(used=[int(i) for i in used], frames_used=len(used))
     if len(used) < min_frames:
-        return _refused("unconstrained" if pinned else "too_few_frames", **seen)
+        return _refused("unconstrained" if pinned else "too_few_frames", o_mag_m, **seen)
     seen["size_ratio"] = float(s.max() / s.min())
     if seen["size_ratio"] < min_size_ratio:
-        return _refused("too_little_range_spread", **seen)
+        return _refused("too_little_range_spread", o_mag_m, **seen)
     xy = dots[used]
     t = xy @ u
     tv = fit_vanishing_position(t, s)
@@ -520,7 +616,7 @@ def fit_label_free(
         vanishing_px=tv, line_direction=[float(c) for c in u], line_offset_px=offset
     )
     if _pinned(t, tv):
-        return _refused("unconstrained", **seen)
+        return _refused("unconstrained", o_mag_m, **seen)
     origin, axis = beam_from_vanishing(tv, u, offset, camera_matrix, o_mag_m)
     return LabelFreeFit(
         outcome="accepted",

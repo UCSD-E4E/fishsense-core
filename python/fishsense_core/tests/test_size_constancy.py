@@ -64,7 +64,16 @@ def _stored_vanishing(d, u):
 # -- golden: cscw's labelfree_tv.csv, from cscw's own pair equations -----------------
 
 
-@pytest.mark.parametrize("mission", sorted(GOLDEN, key=int))
+# Session 114 is core's one departure from cscw's solve. Frame 7's pairs
+# include one at log scale -37.18 (a factor of ~1e16), which drags its first
+# solve so far that every one of its pairs fails the robust pass. cscw still
+# counted it "connected" and fitted the size the gauge made up for it (its
+# bootstrap SE was 4.41 px); core gives it no size. The other nine sessions are
+# cscw's exactly.
+_CSCW_DEPARTS = {"114"}
+
+
+@pytest.mark.parametrize("mission", sorted(set(GOLDEN) - _CSCW_DEPARTS, key=int))
 def test_reproduces_cscws_label_free_fit(mission):
     d = GOLDEN[mission]
     want = d["expected"]
@@ -85,9 +94,27 @@ def test_reproduces_cscws_label_free_fit(mission):
     assert tv - _stored_vanishing(d, u) == pytest.approx(want["err_px"], abs=1e-4)
 
 
+def test_session_114_drops_the_frame_cscw_gave_a_made_up_size():
+    """Every pair through frame 7 fails the robust pass, so it has no size
+    relative to the rest; cscw fitted one anyway. Without it the solve alone
+    lands where cscw's fit only got after its trim dropped the frame."""
+    d = GOLDEN["114"]
+    dots = np.array(d["dots"])
+    sizes = sc.solve_log_sizes(len(dots), _pairs(d))
+    assert np.flatnonzero(~sizes.connected).tolist() == [7]
+    assert np.isnan(sizes.log_sizes[7])
+    u = sc.line_direction(d["line"], dots[sizes.connected])
+    t = dots[sizes.connected] @ u
+    tv = sc.fit_vanishing_position(t, np.exp(sizes.log_sizes[sizes.connected]))
+    assert tv == pytest.approx(-2273.7843259011893, abs=_TV_ABS)
+    assert sizes.residual_sd == pytest.approx(0.009128963751628413, rel=1e-6)
+
+
 def test_bootstrap_reproduces_cscws_standard_errors():
     """cscw draws every session's bootstrap from one generator, in Table 3's
-    order; so must this, to reproduce its SEs."""
+    order; so must this, to reproduce its SEs. Session 114 is last, so the
+    draws before it are unchanged; its own SE falls from cscw's 4.41 px to
+    0.73 px once frame 7's made-up size is gone."""
     rng = np.random.default_rng(0)
     for mission in sorted(GOLDEN, key=int):
         d = GOLDEN[mission]
@@ -96,12 +123,13 @@ def test_bootstrap_reproduces_cscws_standard_errors():
         xy = dots[sizes.connected]
         t = xy @ sc.line_direction(d["line"], xy)
         se = sc.bootstrap_se(t, np.exp(sizes.log_sizes[sizes.connected]), rng=rng)
-        assert se == pytest.approx(d["expected"]["se_px"], rel=1e-6), mission
+        want = 0.7291465961104082 if mission in _CSCW_DEPARTS else d["expected"]["se_px"]
+        assert se == pytest.approx(want, rel=1e-6), mission
 
 
 def test_table_3_all_ten_within_0_05_deg():
-    """cscw: 9 of 10 within 0.05 deg, all within 0.15. v2's frame trim drops
-    one frame of session 114 (0.129 -> 0.048 deg); the rest are cscw's fits."""
+    """cscw: 9 of 10 within 0.05 deg, all within 0.15. Session 114's frame 7
+    (0.129 deg in cscw) is now out of the solve; 0.0485 deg."""
     errors = []
     for d in GOLDEN.values():
         fit = sc.fit_label_free(
@@ -358,6 +386,106 @@ def test_refuses_frames_no_pair_connects():
     assert (fit.outcome, fit.refusal_reason) == ("refused", "too_few_matched_pairs")
 
 
+def _two_clusters(z, split):
+    """Exact pairs within frames [0, split) and within [split, n), none across."""
+    logs, n = -np.log(z), len(z)
+    return [
+        sc.PairScale(i, j, logs[j] - logs[i], 20)
+        for i in range(n) for j in range(i + 1, n)
+        if (i < split) == (j < split)
+    ]  # fmt: skip
+
+
+def test_two_unlinked_clusters_are_not_sized_against_each_other():
+    """Two passes of the object that never cross-match: every frame has pairs,
+    but the gauge alone would set one cluster's sizes against the other's.
+    Only the larger cluster is sized."""
+    z = np.linspace(1.0, 3.0, 12)
+    sizes = sc.solve_log_sizes(12, _two_clusters(z, 5))
+    assert sizes.connected.tolist() == [False] * 5 + [True] * 7
+    assert np.isnan(sizes.log_sizes[:5]).all()
+    # Within the cluster the ratios are the true ones.
+    got = sizes.log_sizes[5:] - sizes.log_sizes[5:].mean()
+    want = -np.log(z[5:]) - (-np.log(z[5:])).mean()
+    assert got == pytest.approx(want, abs=1e-12)
+
+
+def test_a_fit_over_two_unlinked_clusters_uses_one():
+    z = np.linspace(1.0, 3.0, 12)
+    dots = np.array([_dot_at(zi) for zi in z])
+    fit = sc.fit_label_free(dots=dots, pairs=_two_clusters(z, 4), camera_matrix=K)
+    assert fit.used == list(range(4, 12))
+
+
+def test_a_frame_whose_only_pairs_fail_the_robust_pass_has_no_size():
+    """Session 114's case: frame 7's two pairs contradict each other (one a
+    wrong-layer match ~e^5 off), so its first solve splits the difference and
+    both fail the robust pass. With no pair left it has no size, not one the
+    gauge made up. (A lone pair could not be judged: with no loop, nothing
+    contradicts it.)"""
+    z = np.linspace(1.0, 3.0, 12)
+    logs = -np.log(z)
+    pairs = [p for p in _exact_pairs(z) if 7 not in (p.i, p.j)]
+    pairs.append(sc.PairScale(3, 7, logs[7] - logs[3], 20))
+    pairs.append(sc.PairScale(4, 7, logs[7] - logs[4] + 5.0, 20))
+    sizes = sc.solve_log_sizes(12, pairs)
+    assert not sizes.connected[7] and np.isnan(sizes.log_sizes[7])
+    # The single robust pass (the paper's) also loses frames 3 and 4 here: the
+    # outlier's error spreads into them in the first solve. Every frame that
+    # keeps a size has the true one; none has a made-up one.
+    sized = sizes.connected
+    got = sizes.log_sizes[sized] - sizes.log_sizes[sized].mean()
+    want = logs[sized] - logs[sized].mean()
+    assert got == pytest.approx(want, abs=1e-12)
+    assert np.isnan(sizes.log_sizes[~sized]).all()
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        sc.PairScale(0, 1, 0.1, 0),
+        sc.PairScale(0, 1, float("nan"), 5),
+        sc.PairScale(0, 1, float("inf"), 5),
+        sc.PairScale(0, 12, 0.1, 5),
+        sc.PairScale(3, 3, 0.0, 5),
+    ],
+    ids=["near-zero", "nan-scale", "inf-scale", "out-of-range", "self-pair"],
+)
+def test_a_malformed_pair_is_an_error_not_silent_zeros(bad):
+    """near=0 used to make every residual NaN, reject every pair and return
+    all-zero sizes with no error."""
+    pairs = _exact_pairs(np.linspace(1.0, 3.0, 12)) + [bad]
+    with pytest.raises(ValueError):
+        sc.solve_log_sizes(12, pairs)
+
+
+def test_with_no_line_the_direction_follows_the_trim():
+    """A detector dot far off the true line, on a frame whose size puts it at
+    the wrong range: the trim drops it, and the direction is refitted from the
+    frames that remain, so it no longer tilts the line."""
+    z = np.linspace(1.0, 3.0, 12)
+    dots = np.array([_dot_at(zi) for zi in z])
+    dots[6] = dots[6] + np.array([120.0, 40.0])  # off the beam's line
+    sizes = 1.0 / z
+    sizes[6] *= 1.6  # and at the wrong range for its place
+    fit = sc.fit_label_free(dots=dots, pairs=_exact_pairs(1.0 / sizes), camera_matrix=K)
+    assert 6 not in fit.used
+    clean = np.delete(dots, 6, axis=0)
+    want = sc.line_direction(None, clean)
+    assert fit.line_direction == pytest.approx(want.tolist(), abs=1e-12)
+
+
+def test_a_refusal_reports_the_offset_it_was_given():
+    z = np.linspace(1.0, 3.0, 12)
+    dots = np.array([_dot_at(zi) for zi in z])
+    fit = sc.fit_label_free(dots=dots, pairs=[], camera_matrix=K, o_mag_m=0.12)
+    assert (fit.outcome, fit.o_mag_m) == ("refused", 0.12)
+
+
+def test_the_result_has_no_services_only_fields():
+    assert "scale_sd" not in {f.name for f in sc.LabelFreeFit.__dataclass_fields__.values()}
+
+
 def test_refuses_a_fit_pinned_at_the_search_bound():
     """Unconstrained: the optimum is the bracket's edge, not a minimum."""
     z = np.linspace(1.0, 3.0, 12)
@@ -563,8 +691,11 @@ def test_pool_fits_match_the_services_shadow_port(session, variant, tv, se_px):
         ("80", -2075.52982343564, 1.1864945722318934, 31,
          [0.021941865426729087, 0.027812417254195643, 0.9993723149998073],
          [-0.029640994130566624, -0.09968656613080679, 0.0]),
-        ("114", -2273.5939549207674, 0.8149804544450181, 28,
-         [0.02113307546381264, 0.03277202789457865, 0.9992394044017269],
+        # services: tv -2273.5939549207674, se 0.8149804544450181, axis
+        # [0.02113307546381264, 0.03277202789457865, 0.9992394044017269]. Both
+        # drop frame 7; core's sizes are solved with its bad pairs already out.
+        ("114", -2273.7843259011893, 0.8122183526337636, 28,
+         [0.021162177941014645, 0.032831945741439605, 0.9992368215611472],
          [-0.045454413480002474, -0.09354088034217428, 0.0]),
     ],
 )  # fmt: skip
