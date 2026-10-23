@@ -26,6 +26,13 @@ is unchanged and its choices are measured:
   (lab mission 383: a 686 mm grouper cut at both ends measured 554 mm). The
   cut mask is never kept: the whole frame answers, or the frame abstains.
   Off by default, as for the human pre-fill path, whose output is pinned.
+* **SAM's score as a gate** (``score_gate``, the automatic chain's; paper
+  §6.3, fishsense-services' ``AUTOMATIC_SAM_SCORE_GATE`` is 0.5): masks
+  scoring under it are dropped *before* the laser gate, so a weak mask under
+  the dot is no fish and a confident one off it does not count. The kept
+  mask's score is reported on :attr:`FishAtDot.score` whenever the segmenter
+  scores its masks (:class:`ScoredSegmenter`), gate or not; with
+  ``grow_cut_masks`` it is the whole frame's mask's. Off by default.
 
 What this module does **not** do is the service's job and stays there: decode
 the JPEG, map a status to a database row, name a laser *label* (a caller gets
@@ -55,8 +62,19 @@ from __future__ import annotations
 # pylint: disable=too-many-instance-attributes,too-many-locals
 
 import logging
+import math
 from dataclasses import dataclass, field
-from typing import Any, Iterable, List, Optional, Protocol, Sequence, Tuple
+from typing import (
+    Any,
+    Iterable,
+    List,
+    Optional,
+    Protocol,
+    Sequence,
+    Tuple,
+    overload,
+    runtime_checkable,
+)
 
 import numpy as np
 
@@ -73,6 +91,7 @@ __all__ = [
     "FishAtDot",
     "FishialSegmenter",
     "Sam3Segmenter",
+    "ScoredSegmenter",
     "Segmenter",
     "crop_origin",
     "cut_by_window",
@@ -151,18 +170,18 @@ def lift_point(point: Sequence[float], origin_x: int, origin_y: int) -> Tuple[fl
 
 
 def _gate(
-    masks: Iterable[np.ndarray], points: Sequence[Sequence[float]]
-) -> Optional[Tuple[int, np.ndarray]]:
-    """The laser gate, once: ``(dot index, mask)`` for the first dot that
-    lands on any mask, trying dots in order and masks in order. None when
-    none does. :func:`mask_at_point` and the kernel both read this, so the
-    dot a result names is the one that chose its mask by construction."""
-    masks = list(masks)
+    masks: Sequence[np.ndarray], points: Sequence[Sequence[float]]
+) -> Optional[Tuple[int, int]]:
+    """The laser gate, once: ``(dot index, mask index)`` for the first dot
+    that lands on any mask, trying dots in order and masks in order. None
+    when none does. :func:`mask_at_point` and the kernel both read this, so
+    the dot a result names, and the score it reports, are the ones of the
+    mask it chose by construction. Both callers pass a list already."""
     for index, (px, py) in enumerate(points):
         xi, yi = int(round(px)), int(round(py))
-        for mask in masks:
+        for k, mask in enumerate(masks):
             if 0 <= yi < mask.shape[0] and 0 <= xi < mask.shape[1] and mask[yi, xi]:
-                return index, mask
+                return index, k
     return None
 
 
@@ -172,8 +191,9 @@ def mask_at_point(
     """The laser gate: the first mask whose pixel at a laser dot is set. Every
     dot is tried, first hit wins. None (an abstention, not an error) when no
     dot lands on any mask."""
+    masks = list(masks)
     hit = _gate(masks, points)
-    return None if hit is None else hit[1]
+    return None if hit is None else masks[hit[1]]
 
 
 def silhouette_ratio(mask_area_px: int, length_px: float) -> Optional[float]:
@@ -217,6 +237,20 @@ class Segmenter(Protocol):  # pylint: disable=too-few-public-methods
         instance. Empty when nothing was found."""
 
 
+@runtime_checkable
+class ScoredSegmenter(Segmenter, Protocol):  # pylint: disable=too-few-public-methods
+    """A :class:`Segmenter` that also scores its masks, in ``[0, 1]``.
+    :func:`find_fish_at_dot` calls ``segment_scored`` instead of ``segment``
+    **only when given a** ``score_gate``; without one it calls ``segment``,
+    exactly as for any segmenter. A segmenter that post-processes its masks
+    (drops tiny ones, merges instances) must therefore do it in both."""
+
+    def segment_scored(self, image_bgr: np.ndarray) -> List[Tuple[np.ndarray, Optional[float]]]:
+        """``(mask, score)`` per instance, the masks exactly ``segment``'s and
+        in its order. A score is None when the backend gave none, which a
+        gate refuses."""
+
+
 def to_numpy(mask: Any) -> np.ndarray:
     """A mask as an ndarray, whatever the backend handed back: a device
     tensor is detached and moved to the CPU first (``np.asarray`` on a CUDA
@@ -238,10 +272,10 @@ class Sam3Segmenter:  # pylint: disable=too-few-public-methods
         self._processor = processor
         self._prompt = prompt
 
-    def segment(self, image_bgr: np.ndarray) -> List[np.ndarray]:
+    def _run(self, image_bgr: np.ndarray) -> Any:
         """One concept-prompted segmentation, under bfloat16 autocast entered
         as a context manager (the thread is reused), on a PIL image (an HWC
-        array yields three-pixel-wide masks)."""
+        array yields three-pixel-wide masks). Returns SAM's state."""
         # cv2 is a C extension pylint cannot introspect; torch and PIL are the
         # caller's and load on first use.
         # pylint: disable=import-outside-toplevel,import-error,no-member
@@ -253,14 +287,62 @@ class Sam3Segmenter:  # pylint: disable=too-few-public-methods
         device_type = "cuda" if torch.cuda.is_available() else "cpu"
         with torch.autocast(device_type, dtype=torch.bfloat16):
             state = self._processor.set_image(PIL.Image.fromarray(rgb))
-            state = self._processor.set_text_prompt(self._prompt, state)
+            return self._processor.set_text_prompt(self._prompt, state)
+
+    @staticmethod
+    def _masks(state: Any) -> Optional[List[np.ndarray]]:
+        """The state's masks as ``(H, W)`` arrays; None when it holds none."""
         masks = state.get("masks") if hasattr(state, "get") else None
         if masks is None:
-            return []
+            return None
         if getattr(masks, "detach", None) is not None:
             # One (N, 1, H, W) tensor: one device-to-host transfer, not N.
             masks = to_numpy(masks)
         return [to_numpy(m).squeeze() for m in masks]
+
+    def segment(self, image_bgr: np.ndarray) -> List[np.ndarray]:
+        """SAM's masks for ``image_bgr``. Scores are never read here: a caller
+        that wants none pays no transfer for them and is not refused over
+        them."""
+        return self._masks(self._run(image_bgr)) or []
+
+    def segment_scored(self, image_bgr: np.ndarray) -> List[Tuple[np.ndarray, Optional[float]]]:
+        """:meth:`segment`'s masks, each with SAM's score from
+        ``state["scores"]``, as float (numpy has no bfloat16).
+
+        Raises:
+            ValueError: This SAM build put no ``scores`` in its state, even
+                on a frame with no masks, so a gate's misconfiguration shows
+                on the first frame rather than the first fish; or the score
+                count does not match the masks, since pairing them would name
+                the wrong mask's score.
+        """
+        state = self._run(image_bgr)
+        masks = self._masks(state)
+        if masks is None:
+            return []
+        scores = state.get("scores")
+        if scores is None:
+            raise ValueError("this SAM 3.1 build returns no scores (state has no 'scores')")
+        values = _score_values(scores)
+        if len(values) != len(masks):
+            raise ValueError(f"SAM 3.1 returned {len(masks)} masks but {len(values)} scores")
+        return list(zip(masks, values))
+
+
+def _score_values(scores: Any) -> List[float]:
+    """SAM's scores as floats: one ``(N,)`` tensor crosses to the host once;
+    a list of per-mask tensors (as masks can be) is read one by one. Each
+    tensor is cast to float32 first, since numpy has no bfloat16."""
+
+    def host(value: Any) -> np.ndarray:
+        if getattr(value, "detach", None) is not None and getattr(value, "float", None) is not None:
+            value = value.float()
+        return to_numpy(value).reshape(-1)
+
+    if getattr(scores, "detach", None) is not None:
+        return [float(v) for v in host(scores)]
+    return [float(v) for item in scores for v in host(item)]
 
 
 class FishialSegmenter:  # pylint: disable=too-few-public-methods
@@ -317,6 +399,11 @@ class FishAtDot:
     head: Optional[Tuple[float, float]] = None
     tail: Optional[Tuple[float, float]] = None
     silhouette_ratio: Optional[float] = None
+    #: The kept mask's segmenter score (SAM's), reported when a ``score_gate``
+    #: was given; with ``grow_cut_masks`` the whole frame's mask's. None when
+    #: no mask was kept or no gate was given. Always finite when set, so it
+    #: keeps equality and hashing working.
+    score: Optional[float] = None
 
     @property
     def length_px(self) -> Optional[float]:
@@ -324,6 +411,34 @@ class FishAtDot:
         if self.head is None or self.tail is None:
             return None
         return float(np.hypot(self.head[0] - self.tail[0], self.head[1] - self.tail[1]))
+
+
+@overload
+def find_fish_at_dot(
+    frame_bgr: np.ndarray,
+    laser_points: Sequence[Sequence[float]],
+    segmenter: Segmenter,
+    *,
+    crop_w: int = ...,
+    crop_h: int = ...,
+    grow_cut_masks: bool = ...,
+    head_tail_detector: Any = ...,
+    score_gate: None = ...,
+) -> FishAtDot: ...
+
+
+@overload
+def find_fish_at_dot(
+    frame_bgr: np.ndarray,
+    laser_points: Sequence[Sequence[float]],
+    segmenter: ScoredSegmenter,
+    *,
+    crop_w: int = ...,
+    crop_h: int = ...,
+    grow_cut_masks: bool = ...,
+    head_tail_detector: Any = ...,
+    score_gate: float,
+) -> FishAtDot: ...
 
 
 def find_fish_at_dot(
@@ -335,6 +450,7 @@ def find_fish_at_dot(
     crop_h: int = CROP_HEIGHT,
     grow_cut_masks: bool = False,
     head_tail_detector: Any = None,
+    score_gate: Optional[float] = None,
 ) -> FishAtDot:
     """Crop, segment, gate, keypoint, and lift back to frame pixels.
 
@@ -352,11 +468,27 @@ def find_fish_at_dot(
             the human pre-fill, whose output is pinned.
         head_tail_detector: Anything with ``find_head_tail_img(mask)``;
             defaults to :class:`fishsense_core.fish.FishHeadTailDetector`.
+        score_gate: Keep only masks scoring at least this (inclusive, in
+            ``[0, 1]``), before the laser gate and on both passes; no mask
+            left is ``no_detections``, and the kept mask's score is reported
+            on ``FishAtDot.score``. The automatic chain's (fishsense-services
+            passes its ``AUTOMATIC_SAM_SCORE_GATE``, 0.5). None, the default,
+            gates nothing and reads no scores: the segmenter's plain
+            ``segment`` is called, exactly as without this parameter.
 
     Returns:
         A :class:`FishAtDot`. Abstentions are statuses, not exceptions: a
         decoded frame always yields a result.
+
+    Raises:
+        ValueError: ``score_gate`` is not a number in ``[0, 1]`` (checked
+            before any work, so a typo such as 50 fails the first frame
+            rather than turning every frame into ``no_detections``); or a
+            mask came back with no usable score (None, NaN) under a gate.
+        TypeError: ``score_gate`` was given and ``segmenter`` is not a
+            :class:`ScoredSegmenter`; also checked before any work.
     """
+    _check_gate(score_gate, segmenter)
     height, width = frame_bgr.shape[:2]
     if len(laser_points) == 0:
         return FishAtDot(STATUS_LASER_OFF_ALL_FISH, width, height, 0, 0)
@@ -367,7 +499,7 @@ def find_fish_at_dot(
     crop = np.ascontiguousarray(
         frame_bgr[origin_y : origin_y + crop_h, origin_x : origin_x + crop_w]
     )
-    masks = segmenter.segment(crop)
+    masks, scores = _segment(segmenter, crop, score_gate)
     # With no mask kept, the answer came from the crop, centred on the first
     # dot, so the abstention names it.
     placed = {"width": width, "height": height, "crop_x": origin_x, "crop_y": origin_y, "dot": 0}
@@ -378,7 +510,8 @@ def find_fish_at_dot(
     hit = _gate(masks, local_points)
     if hit is None:
         return FishAtDot(STATUS_LASER_OFF_ALL_FISH, **placed)
-    dot, mask = hit
+    dot, kept = hit
+    mask, score = masks[kept], scores[kept]
 
     binary = (np.asarray(mask) > 0).astype(np.uint8)
     if grow_cut_masks and cut_by_window(binary, origin_x, origin_y, width, height):
@@ -388,13 +521,14 @@ def find_fish_at_dot(
         origin_x = origin_y = 0
         placed.update(crop_x=0, crop_y=0)
         local_points = [(float(px), float(py)) for px, py in laser_points]
-        masks = segmenter.segment(np.ascontiguousarray(frame_bgr))
+        masks, scores = _segment(segmenter, np.ascontiguousarray(frame_bgr), score_gate)
         if not masks:
             return FishAtDot(STATUS_NO_DETECTIONS, **placed)
         hit = _gate(masks, local_points)
         if hit is None:
             return FishAtDot(STATUS_LASER_OFF_ALL_FISH, **placed)
-        dot, mask = hit
+        dot, kept = hit
+        mask, score = masks[kept], scores[kept]
         binary = (np.asarray(mask) > 0).astype(np.uint8)
 
     return _keypoint(
@@ -402,8 +536,51 @@ def find_fish_at_dot(
         origin=(origin_x, origin_y),
         frame_size=(width, height),
         dot=dot,
+        score=score,
         head_tail_detector=head_tail_detector,
     )
+
+
+def _check_gate(score_gate: Optional[float], segmenter: Segmenter) -> None:
+    """Refuse a gate that cannot work, before any frame is segmented."""
+    if score_gate is None:
+        return
+    if (
+        isinstance(score_gate, bool)
+        or not isinstance(score_gate, (int, float))
+        or not math.isfinite(score_gate)
+        or not 0.0 <= score_gate <= 1.0
+    ):
+        raise ValueError(f"score_gate must be a number in [0, 1]; got {score_gate!r}")
+    if not isinstance(segmenter, ScoredSegmenter):
+        raise TypeError(
+            f"score_gate={score_gate} needs a ScoredSegmenter (segment_scored); "
+            f"{type(segmenter).__name__} scores nothing"
+        )
+
+
+def _segment(
+    segmenter: Segmenter, image_bgr: np.ndarray, score_gate: Optional[float]
+) -> Tuple[List[np.ndarray], List[Optional[float]]]:
+    """One segmentation, as parallel ``(masks, scores)`` lists. With no gate
+    the segmenter's own ``segment`` is called, exactly as before scores
+    existed, and no score is read. With one, ``segment_scored`` is, and masks
+    scoring under it are dropped; a score that is None or not finite
+    (NaN, inf) is no score, and refused rather than read as a low one."""
+    if score_gate is None:
+        masks = list(segmenter.segment(image_bgr))
+        return masks, [None] * len(masks)
+    pairs = []
+    for mask, score in segmenter.segment_scored(image_bgr):  # type: ignore[attr-defined]
+        value = None if score is None else float(score)
+        if value is None or not math.isfinite(value):
+            raise ValueError(
+                f"score_gate={score_gate} given but a mask came back with no usable "
+                f"score ({score!r})"
+            )
+        if value >= score_gate:
+            pairs.append((mask, value))
+    return [m for m, _ in pairs], [s for _, s in pairs]
 
 
 def _keypoint(
@@ -412,6 +589,7 @@ def _keypoint(
     origin: Tuple[int, int],
     frame_size: Tuple[int, int],
     dot: int,
+    score: Optional[float],
     head_tail_detector: Any,
 ) -> FishAtDot:
     """Keypoint one kept mask and lift the result into frame coordinates."""
@@ -423,6 +601,7 @@ def _keypoint(
         "crop_x": origin_x,
         "crop_y": origin_y,
         "dot": dot,
+        "score": score,
         "mask": binary,
         # The kept mask's box, on a failure too: the fish is known even when
         # its keypoints are not.
