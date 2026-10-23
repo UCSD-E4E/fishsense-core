@@ -22,9 +22,11 @@
 #                            absent, and resolving it is an error, never a
 #                            fallback to another target's file.
 #
-# Not here yet: SAM 3.1 (`sam3` / `3.1` / `sam3.1_multiplex.pt`, 3502755717
-# bytes). facebook/sam3.1 is gated and does not publish the hash; it gets an
-# entry once the copy in the `model-weights` bucket has been hashed.
+# SAM 3.1 has no `[model.origin.*]`: facebook/sam3.1 is gated, so there is no
+# public place to fetch it from. A credentialed store (the `model-weights`
+# bucket's `sam3/3.1/sam3.1_multiplex.pt`) or a `LocalDirStore` serves it; the
+# hash still decides. The hash and size were measured on the checkpoint
+# fishsense-detector pins (`weights.toml`), the one production runs.
 
 [[model]]
 name = "fishial"
@@ -71,3 +73,14 @@ targets = ["server"]
 filename = "run7_hrnet_w18_epoch_021.pt"
 sha256 = "17a4cd13358fe98093ad06cb9097d7ced844b305784cc32a6d26ead63dae6577"
 size = 196071469
+
+[[model]]
+name = "sam3"
+version = "3.1"
+default = true
+
+[[model.artifact]]
+targets = ["server"]
+filename = "sam3.1_multiplex.pt"
+sha256 = "0567debeec80ba4ac6369540c6c248025283cb3ff2b92827509e57e2b3541cb6"
+size = 3502755717
