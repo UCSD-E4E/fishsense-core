@@ -72,3 +72,44 @@ jobs:
     - name: Show hang dump
       if: failure()
       run: cat "${FISHSENSE_HANG_DUMP}" 2>/dev/null || echo "(no hang dump — failure was not a watchdog timeout)"
+
+  # Every extra at the version uv.lock pins, so a dependency bump (a
+  # Dependabot PR included) is tested against what the extras actually load:
+  # the laser detector, the slate mask and the denoiser skip in the job above,
+  # which installs none of them. torch is the one substitution: the lock's
+  # PyPI wheel carries a CUDA runtime, so the job takes the same torch and
+  # torchvision versions from the CPU index instead. A test that skips for a
+  # missing module is a failure here; `shell: bash` turns on pipefail, so a
+  # failing pytest is not hidden behind tee.
+  test-ubuntu-extras:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      OPENBLAS_NUM_THREADS: "1"
+      OMP_NUM_THREADS: "1"
+      FISHSENSE_ORT_INTRA_THREADS: "1"
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python 3.13
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.13"
+    - name: Install the dev group, then every extra at its locked version
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libopenblas-dev
+        python -m pip install --upgrade pip uv
+        uv sync --group dev
+        locked() { sed -n "/^name = \"$1\"\$/{n;s/^version = \"\(.*\)\"/\1/p}" uv.lock; }
+        TORCH=$(locked torch); TORCHVISION=$(locked torchvision)
+        test -n "$TORCH" && test -n "$TORCHVISION"
+        uv export --frozen --all-extras --group dev --no-hashes --no-emit-project --no-header \
+          | grep -vE '^\s*#|^(torch|torchvision|triton|nvidia-|cuda-)' > locked-extras.txt
+        uv pip install --torch-backend=cpu "torch==$TORCH" "torchvision==$TORCHVISION" -r locked-extras.txt
+        uv pip list | grep -iE '^(torch|torchvision|pillow|timm|segmentation-models-pytorch|bm3d|huggingface-hub) '
+    - name: Run the whole suite with the extras installed
+      shell: bash
+      run: |
+        uv run --no-sync pytest --timeout=300 -rs | tee pytest.log
+        if grep -q "could not import" pytest.log; then echo "a test skipped for a missing extra"; exit 1; fi
