@@ -240,7 +240,9 @@ def build_model(pretrained: bool = False) -> "torch.nn.Module":
         ) from exc
     nn = torch.nn
 
-    class SimCC(nn.Module):
+    # Without torch installed (CI's lint job) pylint cannot see nn.Module's
+    # methods and counts the class as having one.
+    class SimCC(nn.Module):  # pylint: disable=too-few-public-methods
         """``forward(x) -> (logits_x, logits_y)``, each ``(B, NK, IN * K)``."""
 
         def __init__(self):
