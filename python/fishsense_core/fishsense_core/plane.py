@@ -28,7 +28,10 @@ alone recovers the plane only up to scale.
 This is the bridge primitive between the slate detector's board pose and
 :func:`fishsense_core.laser.calibrate_laser`: intersect each laser ray with the
 board plane (:func:`laser_point_on_plane`) to get the 3-D points calibration
-fits. It is pure NumPy — no native extension, no optional dependency.
+fits. It needs no native extension and no optional dependency: NumPy, plus
+OpenCV's ``solvePnP`` for :func:`plane_from_correspondences`, which recovers
+the plane from a target's 2-D <-> 3-D correspondences (the slate and
+checkerboard producers share it).
 
 Ported from ``slate_training.geometry`` (``UCSD-E4E/2026-07-31_slate_training``),
 which now imports these definitions from here.
@@ -39,9 +42,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Tuple
 
+import cv2
 import numpy as np
 
-__all__ = ["Plane", "plane_from_pose", "plane_difference", "laser_point_on_plane"]
+__all__ = [
+    "Plane",
+    "plane_from_pose",
+    "plane_from_correspondences",
+    "plane_difference",
+    "laser_point_on_plane",
+]
 
 
 @dataclass(frozen=True)
@@ -68,6 +78,50 @@ def plane_from_pose(rotation: np.ndarray, translation: np.ndarray) -> Plane:
     normal = normal / np.linalg.norm(normal)
     point = np.asarray(translation, dtype=float).reshape(3)
     return Plane(normal, float(normal @ point))
+
+
+def plane_from_correspondences(
+    body_points, image_points, camera_matrix: np.ndarray
+) -> "Plane | None":
+    """Recover the plane a planar target occupied, from 2-D <-> 3-D pairs.
+
+    ``body_points`` are the target's own coordinates in **metres**, ``(N, 2)``
+    or ``(N, 3)`` with z=0 (any z column is ignored); ``image_points`` are where
+    those landed in the **rectified** image, ``(N, 2)``, in the same order.
+    Ordering is the caller's contract: ``solvePnP`` pairs them purely by
+    position. The target's shape never reaches the answer — a dive slate's six
+    hand-clicked points and a checkerboard's grid of detected corners on the
+    same physical plane yield the same :class:`Plane`.
+
+    ``solvePnP`` is given **zero distortion** on purpose: callers must detect
+    their target on the rectified image. Passing raw (distorted) pixels yields
+    a plausible, slightly wrong plane and no error.
+
+    Returns ``None`` when no pose is recoverable (``solvePnP`` reports
+    failure), so one unusable observation can be skipped rather than failing a
+    whole dive. This is **not** a degeneracy check: coincident or collinear
+    correspondences can still return a confident, meaningless plane, so an
+    automatic producer must gate on its own detection quality first.
+
+    Ported from fishsense-services v0.48.0 ``calibration/geometry.py`` (itself
+    from fishsense-lite@77e8f8e5). The body points are cast to float32 before
+    ``solvePnP``, as there, so the recovered pose is the same.
+    """
+    body = np.zeros((len(body_points), 3), dtype=np.float32)
+    body[:, :2] = np.asarray(body_points, dtype=np.float64)[:, :2]
+    image = np.asarray(image_points, dtype=np.float64)
+
+    ret, rvec, tvec = cv2.solvePnP(  # pylint: disable=no-member
+        body, image, camera_matrix, np.zeros((5,))
+    )
+    if not ret:
+        return None
+
+    rotation, _ = cv2.Rodrigues(rvec)  # pylint: disable=no-member
+    # The body's +Z axis in camera space is the normal, and ``tvec`` (the body
+    # origin) lies on the plane. The rotation about the normal is discarded,
+    # which is why a checkerboard's 180-degree ambiguity is irrelevant here.
+    return plane_from_pose(rotation, tvec)
 
 
 def plane_difference(a: Plane, b: Plane) -> Tuple[float, float]:
