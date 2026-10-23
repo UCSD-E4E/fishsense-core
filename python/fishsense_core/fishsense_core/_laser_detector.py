@@ -452,6 +452,31 @@ def rectify_prediction(
     return float(out[0, 0, 0]), float(out[0, 0, 1])
 
 
+def unrectify_prediction(
+    rect_x: float, rect_y: float, k: np.ndarray, dist: np.ndarray
+) -> tuple[float, float]:
+    """Rectified (undistorted) pixel space → raw pixel space: the inverse of
+    :func:`rectify_prediction`, kept beside it so the two stay one transform.
+
+    Undo K, apply the distortion polynomial, reapply K
+    (``cv2.projectPoints`` of the normalised ray). Accepts K as ``(3, 3)``
+    or flat ``(9,)``, as the forward map does. It runs in float64 where the
+    forward map runs in float32 (that is the detector's own precision, and
+    changing it would move every rectified prediction); a round trip
+    therefore agrees to well under a pixel, not bit for bit.
+    """
+    k = np.asarray(k, dtype=np.float64).reshape(3, 3)
+    d = np.asarray(dist, dtype=np.float64).reshape(1, -1)
+    normalized = cv2.undistortPoints(  # pylint: disable=no-member
+        np.array([[[float(rect_x), float(rect_y)]]], dtype=np.float64), k, None
+    ).reshape(1, 2)
+    points_3d = np.hstack([normalized, np.ones((1, 1), dtype=np.float64)])
+    projected, _ = cv2.projectPoints(  # pylint: disable=no-member
+        points_3d, np.zeros(3), np.zeros(3), k, d
+    )
+    return float(projected[0, 0, 0]), float(projected[0, 0, 1])
+
+
 # --------------------------------------------------------------------------
 # Result type
 # --------------------------------------------------------------------------

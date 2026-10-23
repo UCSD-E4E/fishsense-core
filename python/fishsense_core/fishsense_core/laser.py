@@ -8,6 +8,8 @@ from fishsense_core._laser_detector import (
     DEFAULT_RIG_PRIOR_BBOX,
     LaserDetector,
     LaserPrediction,
+    rectify_prediction,
+    unrectify_prediction,
 )
 from fishsense_core.line_fit import (
     COARSE_CALIBRATION_TOLERANCE_PX,
@@ -39,6 +41,8 @@ __all__ = [
     "calibrate_laser",
     "fit_dive_line",
     "flag_outliers",
+    "rectify_prediction",
+    "unrectify_prediction",
 ]
 
 _log = logging.getLogger(__name__)
