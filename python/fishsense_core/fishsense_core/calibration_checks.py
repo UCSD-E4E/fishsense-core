@@ -10,10 +10,14 @@ Those were in turn ported from fishsense-lite@77e8f8e5
 (`robust_laser_fit.py`, `calibration_consistency.py` and
 `libs/fishsense-shared/.../calibration_bounds.py`).
 
-**Why core needs these.** `fishsense_core.laser.calibrate_laser` is plain
-least squares with no outlier rejection and no judgement of its answer, so one
-badly-placed observation drags the whole line, and nothing in the kernel says
-when the line is wrong. Prod dive 77 is the worked example: labelers clicked
+**Why core needs these.** `fishsense_core.laser.calibrate_laser` has no
+outlier rejection and no judgement of its answer. Its direction is the
+normalised sum of every pairwise difference between observations (each
+flipped to point away from the camera), and its origin is where that
+direction through their centroid crosses z = 0. That estimator weights
+far-apart pairs most, so one badly-placed observation far down the range
+drags the whole line, and nothing in the kernel says when the line is wrong.
+Prod dive 77 is the worked example: labelers clicked
 the laser's specular reflection on about half its pool slate frames, so the
 dots formed two parallel lines ~45 px apart; the 3-D fit split the difference
 -- 14 deg off the dive's own dot line, origin far outside the fleet family --
@@ -31,9 +35,10 @@ offset leaves the ray's projection unchanged.
 The pieces, in the order a producer should run them (fishsense-services'
 `calibration/fit.py` is the reference orchestration):
 
-1. refuse below `MIN_LASER_POINTS` usable observations;
-2. `trim_outlying_observations` (one pass, capped);
-3. `fishsense_core.laser.calibrate_laser`, origin z padded to 0;
+1. refuse below your minimum observation count (services refuses below 2);
+2. `trim_outlying_observations` (one pass, capped; drops non-finite rows);
+3. `fishsense_core.laser.calibrate_laser` on the trimmed points (it takes
+   them as they come back);
 4. the four gates, **observation geometry first** because the two projection
    gates abstain on exactly the degenerate geometry that most needs refusing
    (prod dives 347 and 107): `check_observation_geometry`,
@@ -43,12 +48,15 @@ The pieces, in the order a producer should run them (fishsense-services'
 A gate that does not refuse **returns** a verdict (`PASSED` or `ABSTAINED`), so
 a caller can record which gates actually judged the fit; a refusal raises one
 of the four `ValueError` subclasses, whose message names the measured
-statistic, the bound, and `REFUSAL_REMEDIES`.
+statistic and the bound. Malformed input -- an array of the wrong shape -- is
+a caller's bug, not a refusal, and raises `TypeError`, deliberately not a
+`ValueError`, so a handler that records refusals cannot record it as one.
 
-`REFUSAL_REMEDIES` is ported verbatim and describes fishsense-services'
-pipeline levers (the refusal record, priority 'none',
-`calibration_target_id`). It is kept byte-identical so the refusal messages
-services already stores do not change when it switches to this module.
+**What to do about a refusal is the caller's.** Every gate takes a
+``remedies`` string appended to its message. fishsense-services passes its
+operator levers there (its ``REFUSAL_REMEDIES``: the refusal record,
+priority 'none', ``calibration_target_id``), so its stored messages stay
+byte-identical; another caller passes its own, or nothing.
 
 Pure numpy -- no cv2, no `_native` -- so every check is unit-testable on
 synthetic geometry with a known answer, without the Rust kernel in the loop.
@@ -58,27 +66,25 @@ from __future__ import annotations
 
 import numpy as np
 
+from fishsense_core.line_fit import DEFAULT_OUTLIER_SIGMA, MAD_TO_SIGMA
+
 __all__ = [
     "ABSTAINED",
     "DEFAULT_MAX_ANGLE_DEG",
-    "DEFAULT_MAX_BASELINE_M",
     "DEFAULT_MAX_MEDIAN_OFFSET_PX",
     "DEFAULT_MAX_MISSION_MEDIAN_OFFSET_PX",
     "DEFAULT_MAX_MISSION_P90_OFFSET_PX",
-    "DEFAULT_MIN_BASELINE_M",
     "MAD_FLOOR_M",
     "MAX_BASELINE_M",
     "MAX_TRIM_FRACTION",
     "MIN_BASELINE_M",
+    "MIN_AXIS_FORWARD",
     "MIN_DISAGREEING_MISSION_DOTS",
     "MIN_DOT_SPAN_PX",
-    "MIN_LASER_POINTS",
     "MIN_MISSION_DOTS",
     "MIN_OBSERVATION_LEVER_M",
     "MIN_POINTS_TO_TRIM",
-    "OUTLIER_SIGMA",
     "PASSED",
-    "REFUSAL_REMEDIES",
     "CalibrationDoesNotDescribeDiveError",
     "CalibrationImplausibleError",
     "CalibrationInconsistentError",
@@ -97,18 +103,6 @@ __all__ = [
 # a calibration at all). They are copied here as defaults; every gate that
 # reads one takes it as a keyword argument, so services can keep passing its
 # contract values and a disagreement stays visible at the call site.
-
-#: Minimum usable laser observations before a fit is attempted.
-#:
-#: From fishsense-lite@77e8f8e5 perform_laser_calibration_activity.py, where
-#: v1 noted that the api's `MIN_SLATE_LASER_POINTS` must equal it: they are one
-#: threshold spelled twice, on opposite sides of the worker boundary. Not
-#: hypothetical: the cohort used to count completed slate labels rather than
-#: observations, and prod dive 347 (18 labels, 1 live dot) wedged stage 13 for
-#: as long as it was scheduled. No function here reads it -- step 1 of the
-#: order in the module docstring is the caller's -- it is the bound to refuse
-#: below.
-MIN_LASER_POINTS = 2
 
 #: Bounds on the baseline, `norm(laser_position[:2])`, in metres.
 #:
@@ -136,46 +130,32 @@ MIN_LASER_POINTS = 2
 MIN_BASELINE_M = 0.097
 MAX_BASELINE_M = 0.145
 
-#: The defaults `check_baseline_plausible` uses (services' consistency module
-#: re-exported the contract values under these names).
-DEFAULT_MIN_BASELINE_M = MIN_BASELINE_M
-DEFAULT_MAX_BASELINE_M = MAX_BASELINE_M
-
 #: What a gate returns when it does not refuse: it judged and the fit passed,
 #: or it had too little to judge and said nothing. A refusal raises.
 PASSED = "passed"
 ABSTAINED = "abstained"
 
-#: The only thing an operator sees when a fit is refused: services stores it
-#: as the refused row's `refusal_reason` and reads it back from prod. One
-#: string, so the gates cannot drift on the remedies they name.
-#:
-#: **Do not reintroduce the claim that the dive is re-selected hourly.** This
-#: text used to say so, and it was made false by the refusal record: the
-#: refusal is appended to `laser_calibrations`, and both calibration cohorts
-#: then exclude the dive until one of its labels is newer than the refusal.
-#: Five prod dives still carry the stale sentence, and it was later read back
-#: off one of them as a live diagnosis of a churn that was not happening. A
-#: message that describes the wrong failure mode costs more than no message.
-REFUSAL_REMEDIES = (
-    "The refusal is recorded, so this dive has left the calibration cohort "
-    "and nothing is retrying it. It returns on its own once any laser or "
-    "slate label on it is newer than the refusal, or its slate template or "
-    "calibration target changes, so relabelling is enough and there is no "
-    "flag to clear. If its observations cannot be fixed, park it with "
-    "priority 'none' and a note; for a checkerboard dive that needs "
-    "different frames rather than better labels, clear its "
-    "calibration_target_id."
-)
+def _with(remedies: str) -> str:
+    """The caller's remedy text, as a message suffix."""
+    return f" {remedies.strip()}" if remedies and remedies.strip() else ""
+
+
+def _dots(array, what: str) -> np.ndarray:
+    """``array`` as finite (N, 2) pixels; malformed is a caller's bug."""
+    dots = np.asarray(array, dtype=float)
+    if dots.ndim != 2 or dots.shape[1] != 2:
+        raise TypeError(f"{what} must be an (N, 2) array of pixels, got shape {dots.shape}")
+    return dots[np.isfinite(dots).all(axis=1)]
 
 
 def _tls_line(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Total-least-squares line through `points` (2-D or 3-D) ->
     (centroid, unit direction).
 
-    Deliberately not `calibrate_laser`: the trimmer only needs the line the
-    points lie on, not the z=0 crossing the Rust kernel reports. (Services had
-    two identical copies of this, `_fit_line` in 3-D and `_tls_line` in 2-D.)
+    Not `fishsense_core.line_fit`'s TLS, which is 2-D and returns ``a x + b y
+    + c = 0``; this one works in 3-D too and returns a point and a direction.
+    Deliberately not `calibrate_laser` either: the trimmer only needs the line
+    the points lie on, as a proxy for the one the kernel will fit.
     """
     centroid = points.mean(axis=0)
     _, _, vt = np.linalg.svd(points - centroid)
@@ -195,12 +175,6 @@ def _tls_line(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 # constant offset forms a second, parallel line, and the TLS fit splits the
 # difference so no single residual stands out). That is
 # `check_fit_self_consistency`'s job; the two are complementary.
-
-#: Residual, in multiples of the scaled MAD, past which an observation is
-#: dropped. Matches `DEFAULT_OUTLIER_SIGMA` in the laser-label line fit
-#: (`fishsense_core.line_fit`), which solves the same shape of problem in 2-D
-#: and was tuned on real dives.
-OUTLIER_SIGMA = 3.0
 
 #: Floor on the MAD, in metres. Without it a tight set collapses the scale to
 #: near zero and ordinary sub-millimetre scatter reads as a 3-sigma outlier --
@@ -229,12 +203,18 @@ def _residuals(points: np.ndarray) -> np.ndarray:
 def trim_outlying_observations(
     points,
     *,
-    sigma: float = OUTLIER_SIGMA,
+    sigma: float = DEFAULT_OUTLIER_SIGMA,
     mad_floor_m: float = MAD_FLOOR_M,
     max_trim_fraction: float = MAX_TRIM_FRACTION,
 ) -> np.ndarray:
     """Return `points` (N x 3, metres) without the observations that disagree
     with the ray, ready for `calibrate_laser`.
+
+    Non-finite rows (a failed pose or depth) are dropped first: they are not
+    observations. ``sigma`` defaults to `fishsense_core.line_fit`'s
+    ``DEFAULT_OUTLIER_SIGMA``, the same rule on the same shape of problem in
+    2-D, tuned on real dives; the residuals are judged against a TLS line, a
+    proxy for the kernel's pairwise-sum direction (see the module docstring).
 
     One pass, not iterated to convergence. A single robust pass removes the
     gross disagreements that actually move the baseline, while repeated
@@ -244,14 +224,20 @@ def trim_outlying_observations(
     Never mutates the input.
     """
     observations = np.asarray(points, dtype=float)
-    if observations.ndim != 2 or len(observations) < MIN_POINTS_TO_TRIM:
+    if observations.ndim != 2 or observations.shape[1] != 3:
+        raise TypeError(
+            f"points must be an (N, 3) array of camera-space points, got shape "
+            f"{observations.shape}"
+        )
+    observations = observations[np.isfinite(observations).all(axis=1)]
+    if len(observations) < MIN_POINTS_TO_TRIM:
         return observations.copy()
 
     residuals = _residuals(observations)
     median = float(np.median(residuals))
-    # Scaled MAD: 1.4826 makes it a consistent estimator of the standard
+    # Scaled MAD: MAD_TO_SIGMA makes it a consistent estimator of the standard
     # deviation for Gaussian noise, so `sigma` means what it says.
-    mad = 1.4826 * float(np.median(np.abs(residuals - median)))
+    mad = MAD_TO_SIGMA * float(np.median(np.abs(residuals - median)))
     scale = max(mad, mad_floor_m)
 
     keep = residuals <= median + sigma * scale
@@ -295,8 +281,9 @@ class CalibrationImplausibleError(ValueError):
 def check_baseline_plausible(
     laser_position,
     *,
-    min_baseline_m: float = DEFAULT_MIN_BASELINE_M,
-    max_baseline_m: float = DEFAULT_MAX_BASELINE_M,
+    min_baseline_m: float = MIN_BASELINE_M,
+    max_baseline_m: float = MAX_BASELINE_M,
+    remedies: str = "",
 ) -> str:
     """Raise `CalibrationImplausibleError` when the fitted baseline is not a rig.
 
@@ -327,7 +314,7 @@ def check_baseline_plausible(
             f"~10.4 cm; a value this far off means the fit, not the hardware. "
             f"It would scale every depth and every length by that factor, "
             f"invisibly to reprojection residual and to the self-consistency "
-            f"gate. Refusing to persist. {REFUSAL_REMEDIES}"
+            f"gate. Refusing to persist.{_with(remedies)}"
         )
     return PASSED
 
@@ -358,12 +345,20 @@ class CalibrationInconsistentError(ValueError):
     """The fitted laser ray does not reproject onto the dots it came from."""
 
 
+#: A fitted axis whose forward (z) component is below this, after
+#: normalising, is not a laser pointing into the scene: it cannot cross the
+#: working depths, so its image is undefined. The projection gates refuse it.
+MIN_AXIS_FORWARD = 1e-3
+
+
 def _project_ray_to_image_line(
     laser_position: np.ndarray,
     laser_axis: np.ndarray,
     camera_matrix: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    """The image of the fitted laser ray -> (centroid, unit dir).
+) -> "tuple[np.ndarray, np.ndarray] | None":
+    """The image of the fitted laser ray -> (centroid, unit dir), or None
+    when the ray has no image across the working depths: a non-finite fit,
+    or an axis that does not point into the scene (z <= `MIN_AXIS_FORWARD`).
 
     Both projection gates need this same line: one compares it against the
     dots the fit came from, the other against every dot in the dive. Sampling
@@ -373,12 +368,28 @@ def _project_ray_to_image_line(
     """
     origin = np.asarray(laser_position, dtype=float)
     axis = np.asarray(laser_axis, dtype=float)
-    axis = axis / np.linalg.norm(axis)
+    norm = float(np.linalg.norm(axis))
+    if not (np.all(np.isfinite(origin)) and np.isfinite(norm)) or norm == 0.0:
+        return None
+    axis = axis / norm
+    if abs(axis[2]) < MIN_AXIS_FORWARD:
+        return None
     depths = np.linspace(0.2, 4.0, 200)
     ts = (depths - origin[2]) / axis[2]
     ray_points = origin[None, :] + ts[:, None] * axis[None, :]
     homogeneous = (np.asarray(camera_matrix, dtype=float) @ ray_points.T).T
-    return _tls_line(homogeneous[:, :2] / homogeneous[:, 2:3])
+    image = homogeneous[:, :2] / homogeneous[:, 2:3]
+    if not np.all(np.isfinite(image)):
+        return None
+    return _tls_line(image)
+
+
+def _no_image(remedies: str) -> str:
+    return (
+        "the fitted laser ray has no image across the 0.2-4 m working depths "
+        "(non-finite, or its axis does not point into the scene), so it cannot "
+        f"be the laser. Refusing to persist.{_with(remedies)}"
+    )
 
 
 # Seven arguments: the four inputs, then three keyword-only bounds a caller
@@ -394,26 +405,34 @@ def check_fit_self_consistency(  # pylint: disable=too-many-arguments,too-many-l
     max_angle_deg: float = DEFAULT_MAX_ANGLE_DEG,
     max_median_offset_px: float = DEFAULT_MAX_MEDIAN_OFFSET_PX,
     min_span_px: float = MIN_DOT_SPAN_PX,
+    remedies: str = "",
 ) -> str:
     """Raise `CalibrationInconsistentError` when the fitted ray's projection
     disagrees with the 2D laser dots it was computed from.
 
     `laser_position` / `laser_axis` are the fit's origin (z padded to 0) and
     direction; `camera_matrix` is the 3x3 K. `dots_xy` is an (N, 2) array of
-    the laser pixels whose observations fed the fit. Abstains (returns
-    `ABSTAINED`) when N < 2 or the dots' spread is below `min_span_px` -- too
-    degenerate to define a comparison line. Otherwise returns `PASSED`.
+    the laser pixels whose observations fed the fit; non-finite rows are
+    dropped. Abstains (returns `ABSTAINED`) when fewer than 2 remain or their
+    spread is below `min_span_px` -- too degenerate to define a comparison
+    line. Otherwise returns `PASSED`.
+
+    Raises:
+        CalibrationInconsistentError: The refusal; also when the fitted ray
+            has no image (see `_project_ray_to_image_line`).
+        TypeError: ``dots_xy`` is not an (N, 2) array.
     """
-    dots = np.asarray(dots_xy, dtype=float)
-    if dots.ndim != 2 or dots.shape[0] < 2:
+    dots = _dots(dots_xy, "dots_xy")
+    if dots.shape[0] < 2:
         return ABSTAINED
     span = float(np.linalg.norm(dots.max(axis=0) - dots.min(axis=0)))
     if span < min_span_px:
         return ABSTAINED
 
-    proj_centroid, proj_dir = _project_ray_to_image_line(
-        laser_position, laser_axis, camera_matrix
-    )
+    projected = _project_ray_to_image_line(laser_position, laser_axis, camera_matrix)
+    if projected is None:
+        raise CalibrationInconsistentError(_no_image(remedies))
+    proj_centroid, proj_dir = projected
     _, dot_dir = _tls_line(dots)
 
     cos_angle = min(1.0, abs(float(proj_dir @ dot_dir)))
@@ -428,15 +447,15 @@ def check_fit_self_consistency(  # pylint: disable=too-many-arguments,too-many-l
             f"input dot line (gate {max_angle_deg} deg); median offset "
             f"{median_offset_px:.1f}px. The fit disagrees with its own "
             f"observations — mixed dot populations (e.g. specular-reflection "
-            f"mislabels) or corrupt slate poses. Refusing to persist. "
-            f"{REFUSAL_REMEDIES}"
+            f"mislabels) or corrupt slate poses. Refusing to persist."
+            f"{_with(remedies)}"
         )
     if median_offset_px > max_median_offset_px:
         raise CalibrationInconsistentError(
             f"fitted laser ray reprojects with median offset "
             f"{median_offset_px:.1f}px from the input dot line "
             f"(gate {max_median_offset_px}px); angle {angle_deg:.2f} deg. "
-            f"Refusing to persist. {REFUSAL_REMEDIES}"
+            f"Refusing to persist.{_with(remedies)}"
         )
     return PASSED
 
@@ -522,6 +541,7 @@ def check_calibration_describes_mission(  # pylint: disable=too-many-arguments,t
     max_median_offset_px: float = DEFAULT_MAX_MISSION_MEDIAN_OFFSET_PX,
     max_p90_offset_px: float = DEFAULT_MAX_MISSION_P90_OFFSET_PX,
     min_disagreeing_dots: int = MIN_DISAGREEING_MISSION_DOTS,
+    remedies: str = "",
 ) -> str:
     """Raise `CalibrationDoesNotDescribeDiveError` when the fitted ray's
     projection disagrees with the laser dots of the dive it will measure.
@@ -537,20 +557,24 @@ def check_calibration_describes_mission(  # pylint: disable=too-many-arguments,t
     disagrees, which is a property of the fit. The p90 says a subset does,
     which can also be a handful of bad labels the fit never saw, so it fires
     only when at least `min_disagreeing_dots` sit beyond the bound.
+
+    Raises:
+        CalibrationDoesNotDescribeDiveError: The refusal; also when the fitted
+            ray has no image (see `_project_ray_to_image_line`).
+        TypeError: ``mission_dots_xy`` is not an (N, 2) array. It used to
+            abstain, which turned the gate off for a caller bug.
     """
-    dots = np.asarray(mission_dots_xy, dtype=float)
-    if dots.ndim != 2 or dots.shape[1] != 2:
-        return ABSTAINED
-    dots = dots[np.isfinite(dots).all(axis=1)]
+    dots = _dots(mission_dots_xy, "mission_dots_xy")
     if dots.shape[0] < MIN_MISSION_DOTS:
         return ABSTAINED
     span = float(np.linalg.norm(dots.max(axis=0) - dots.min(axis=0)))
     if span < MIN_DOT_SPAN_PX:
         return ABSTAINED
 
-    centroid, direction = _project_ray_to_image_line(
-        laser_position, laser_axis, camera_matrix
-    )
+    projected = _project_ray_to_image_line(laser_position, laser_axis, camera_matrix)
+    if projected is None:
+        raise CalibrationDoesNotDescribeDiveError(_no_image(remedies))
+    centroid, direction = projected
     normal = np.array([-direction[1], direction[0]])
     offsets = np.abs((dots - centroid) @ normal)
     median_px = float(np.median(offsets))
@@ -565,7 +589,7 @@ def check_calibration_describes_mission(  # pylint: disable=too-many-arguments,t
             f"{p90_px:.1f}px). The laser was not in the same state for the "
             f"frames being measured as for the frames it was calibrated from, "
             f"or the fit came from too few observations to constrain it. "
-            f"Refusing to persist. {REFUSAL_REMEDIES}"
+            f"Refusing to persist.{_with(remedies)}"
         )
     if p90_px > max_p90_offset_px and n_disagreeing >= min_disagreeing_dots:
         raise CalibrationDoesNotDescribeDiveError(
@@ -575,7 +599,7 @@ def check_calibration_describes_mission(  # pylint: disable=too-many-arguments,t
             f"{n_disagreeing} of them beyond that bound (floor "
             f"{min_disagreeing_dots}). A real subset of the dive disagrees with "
             f"the fit -- either the laser moved partway through, or those "
-            f"frames' labels are wrong. Refusing to persist. {REFUSAL_REMEDIES}"
+            f"frames' labels are wrong. Refusing to persist.{_with(remedies)}"
         )
     return PASSED
 
@@ -633,6 +657,7 @@ def check_observation_geometry(
     observations_xyz: np.ndarray,
     *,
     min_lever_m: float = MIN_OBSERVATION_LEVER_M,
+    remedies: str = "",
 ) -> str:
     """Raise `CalibrationUnderdeterminedError` when the 3-D observations are
     too tightly grouped along the ray to fix its direction.
@@ -643,11 +668,16 @@ def check_observation_geometry(
     several at one distance, is exactly the case it exists to refuse.
 
     Returns `PASSED`.
+
+    Raises:
+        CalibrationUnderdeterminedError: The refusal.
+        TypeError: ``observations_xyz`` is not an (N, 3) array.
     """
     points = np.asarray(observations_xyz, dtype=float)
     if points.ndim != 2 or points.shape[1] != 3:
-        raise CalibrationUnderdeterminedError(
-            "laser observations are not an (N, 3) array of camera-space points"
+        raise TypeError(
+            "observations_xyz must be an (N, 3) array of camera-space points, got "
+            f"shape {points.shape}"
         )
     points = points[np.isfinite(points).all(axis=1)]
     n = points.shape[0]
@@ -659,6 +689,6 @@ def check_observation_geometry(
             f"The lever arm, not the count, fixes the fitted direction: at this "
             f"spread one pixel of dot-label noise moves every length by several "
             f"percent. Shoot the target at two clearly different distances. "
-            f"Refusing to persist. {REFUSAL_REMEDIES}"
+            f"Refusing to persist.{_with(remedies)}"
         )
     return PASSED

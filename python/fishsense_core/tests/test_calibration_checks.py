@@ -32,18 +32,14 @@ import pytest
 
 from fishsense_core.calibration_checks import (
     ABSTAINED,
-    DEFAULT_MAX_BASELINE_M,
     DEFAULT_MAX_MISSION_MEDIAN_OFFSET_PX,
     DEFAULT_MAX_MISSION_P90_OFFSET_PX,
-    DEFAULT_MIN_BASELINE_M,
     MAX_BASELINE_M,
     MAX_TRIM_FRACTION,
     MIN_BASELINE_M,
     MIN_DISAGREEING_MISSION_DOTS,
-    MIN_LASER_POINTS,
     MIN_OBSERVATION_LEVER_M,
     PASSED,
-    REFUSAL_REMEDIES,
     CalibrationDoesNotDescribeDiveError,
     CalibrationImplausibleError,
     CalibrationInconsistentError,
@@ -71,8 +67,6 @@ def test_golden_contract_bounds():
     """The values services' `calibration_bounds` contract carries."""
     assert MIN_BASELINE_M == 0.097
     assert MAX_BASELINE_M == 0.145
-    assert MIN_LASER_POINTS == 2
-    assert (DEFAULT_MIN_BASELINE_M, DEFAULT_MAX_BASELINE_M) == (0.097, 0.145)
 
 
 def test_golden_baseline_bounds_are_overridable():
@@ -515,10 +509,10 @@ def test_bounds_bracket_the_measured_fleet_cluster():
     comfortably and still exclude 9.51 cm and 16.01 cm, the nearest bad fits on
     each side.
     """
-    assert DEFAULT_MIN_BASELINE_M < 0.0987
-    assert DEFAULT_MIN_BASELINE_M > 0.0951
-    assert DEFAULT_MAX_BASELINE_M > 0.1296
-    assert DEFAULT_MAX_BASELINE_M < 0.1600
+    assert MIN_BASELINE_M < 0.0987
+    assert MIN_BASELINE_M > 0.0951
+    assert MAX_BASELINE_M > 0.1296
+    assert MAX_BASELINE_M < 0.1600
 
 
 # ==========================================================================
@@ -900,59 +894,53 @@ def test_error_names_the_mission_statistic_so_a_refusal_is_actionable():
 
 
 # ==========================================================================
-# REFUSAL_REMEDIES -- ported from fishsense-services v0.48.0
-# services/fishsense-services-processor/tests/test_calibration_consistency_remedies.py
+# Remedies are the caller's
 #
-# What a refusal message tells an operator to do.
-#
-# The message is the only thing an operator sees when a calibration is refused —
-# it is written into `Mission.calibration_refused_reason` and read back from prod —
-# so a claim in it that the code contradicts sends someone to do unnecessary
-# work, or to distrust the pipeline.
-#
-# That happened. The original text said the dive "stays in the calibration cohort
-# and will be re-selected hourly, blocking higher-id dives", which was true when
-# it was written and was made false by `_calibration_refusal_still_stands`:
-# `perform_laser_calibration_activity` now records the refusal via
-# `set_calibration_refused` and both calibration cohorts exclude a refused dive
-# until one of its labels is newer than the refusal. Five prod dives carry the
-# stale sentence, and it was read back as a live diagnosis.
-#
-# v2 change, pinned in the last test: the remedies name v2's levers. v1's said
-# `Priority.NONE` and `DELETE /api/v1/dives/{id}/calibration-target/`; v2's
-# priority is the text `'none'`, the refusal is a `refused` row in
-# `laser_calibrations` rather than dive columns, and an operator can also clear
-# it (`laser_calibration_store.clear_calibration_refusal`).
+# fishsense-services' REFUSAL_REMEDIES (its operator levers: the refusal
+# record, priority 'none', calibration_target_id) used to be baked into every
+# message here. Core's messages say what was measured and stop; a caller
+# appends its own remedy text, and services passes its constant to keep its
+# stored messages byte-identical. The text's own content tests stay in
+# services, where its levers are.
 # ==========================================================================
 
-
-def test_the_message_does_not_claim_an_hourly_re_selection():
-    """The claim the recording mechanism falsified."""
-    lowered = REFUSAL_REMEDIES.lower()
-    assert "re-selected" not in lowered
-    assert "hourly" not in lowered
-    assert "blocking" not in lowered
-
-
-def test_the_message_says_the_refusal_is_recorded_and_self_clearing():
-    """An operator has to know two things the old text omitted: nothing is
-    churning, and relabelling is enough — there is no flag to clear by hand."""
-    lowered = REFUSAL_REMEDIES.lower()
-    assert "recorded" in lowered
-    assert "relabel" in lowered or "label" in lowered
+SERVICES_REMEDIES = (
+    "The refusal is recorded, so this dive has left the calibration cohort "
+    "and nothing is retrying it. It returns on its own once any laser or "
+    "slate label on it is newer than the refusal, or its slate template or "
+    "calibration target changes, so relabelling is enough and there is no "
+    "flag to clear. If its observations cannot be fixed, park it with "
+    "priority 'none' and a note; for a checkerboard dive that needs "
+    "different frames rather than better labels, clear its "
+    "calibration_target_id."
+)
 
 
-def test_the_message_still_names_the_two_manual_remedies():
-    """Parking is for a dive that can never be fixed; clearing the calibration
-    target is the checkerboard-only escape. Both are still the operator's
-    only levers, so dropping them would leave the message advice-free.
+def _refusal(gate, **remedies):
+    with pytest.raises(ValueError) as exc:
+        gate(**remedies)
+    return str(exc.value)
 
-    v2: spelled as v2 stores them -- priority `'none'`, and the dive's
-    `calibration_target_id` -- not v1's enum and route, which don't exist here."""
-    assert "priority 'none'" in REFUSAL_REMEDIES
-    assert "calibration_target_id" in REFUSAL_REMEDIES
-    assert "Priority.NONE" not in REFUSAL_REMEDIES
-    assert "/api/v1/" not in REFUSAL_REMEDIES
+
+_GATES = {
+    "baseline": lambda **kw: check_baseline_plausible([0.02, 0.0, 0.0], **kw),
+    "geometry": lambda **kw: check_observation_geometry(np.zeros((3, 3)), **kw),
+}
+
+
+@pytest.mark.parametrize("gate", sorted(_GATES))
+def test_a_core_refusal_carries_no_services_text(gate):
+    message = _refusal(_GATES[gate])
+    assert "calibration_target_id" not in message
+    assert "priority 'none'" not in message
+    assert message.endswith("Refusing to persist.")
+
+
+@pytest.mark.parametrize("gate", sorted(_GATES))
+def test_a_callers_remedies_are_appended_verbatim(gate):
+    """Services passes its constant and gets the message it stores today."""
+    message = _refusal(_GATES[gate], remedies=SERVICES_REMEDIES)
+    assert message.endswith("Refusing to persist. " + SERVICES_REMEDIES)
 
 
 # ==========================================================================
@@ -1011,3 +999,97 @@ def test_an_abstention_is_reported_as_abstained_not_passed():
 def test_the_verdicts_are_distinct_strings():
     """The verdicts are the strings services records."""
     assert {PASSED, ABSTAINED} == {"passed", "abstained"}
+
+
+# ==========================================================================
+# The review's fixes
+# ==========================================================================
+
+
+def test_the_outlier_rule_is_line_fits_not_a_copy():
+    from fishsense_core import line_fit  # pylint: disable=import-outside-toplevel
+
+    assert calibration_checks.DEFAULT_OUTLIER_SIGMA is line_fit.DEFAULT_OUTLIER_SIGMA
+    assert calibration_checks.MAD_TO_SIGMA is line_fit.MAD_TO_SIGMA
+    for gone in ("OUTLIER_SIGMA", "DEFAULT_MIN_BASELINE_M", "DEFAULT_MAX_BASELINE_M",
+                 "MIN_LASER_POINTS", "REFUSAL_REMEDIES"):  # fmt: skip
+        assert gone not in calibration_checks.__all__
+
+
+def test_the_trim_drops_a_non_finite_observation_instead_of_crashing():
+    """One failed pose or depth used to make the SVD raise LinAlgError, before
+    the geometry gate could refuse cleanly."""
+    depths = np.linspace(0.6, 3.0, 12)
+    points = _ver_points(depths)
+    points[4] = [np.nan, 0.0, 1.0]
+    kept = trim_outlying_observations(points)
+    assert len(kept) == 11 and np.isfinite(kept).all()
+
+
+def test_the_trim_refuses_a_malformed_array():
+    with pytest.raises(TypeError, match=r"\(N, 3\)"):
+        trim_outlying_observations(np.zeros((8, 2)))
+
+
+def test_trimmed_points_reach_calibrate_laser_as_float32(monkeypatch):
+    """The documented order, trim then calibrate_laser: the trim returns
+    float64 and the native kernel takes float32, so the wrapper casts."""
+    from fishsense_core import laser  # pylint: disable=import-outside-toplevel
+
+    seen = {}
+
+    class _Native:  # pylint: disable=too-few-public-methods
+        @staticmethod
+        def calibrate_laser(points):
+            seen["dtype"], seen["shape"] = points.dtype, points.shape
+            return np.zeros(3, np.float32), np.array([0, 0, 1], np.float32)
+
+    monkeypatch.setattr(laser._native, "laser", _Native)  # pylint: disable=protected-access
+    trimmed = trim_outlying_observations(_ver_points(np.linspace(0.6, 3.0, 12)))
+    assert trimmed.dtype == np.float64
+    laser.calibrate_laser(trimmed)
+    assert seen == {"dtype": np.float32, "shape": (12, 3)}
+    with pytest.raises(TypeError, match=r"\(N, 3\)"):
+        laser.calibrate_laser(np.zeros((4, 2)))
+
+
+@pytest.mark.parametrize(
+    "bad", [np.zeros((10, 3)), np.zeros(20), np.zeros((10, 2, 1))], ids=["n-by-3", "flat", "3-d"]
+)
+def test_malformed_dots_are_a_type_error_not_a_refusal_or_an_abstention(bad):
+    """(N, 3) homogeneous pixels used to make the self-consistency gate raise
+    a matmul ValueError (read by a caller as a refusal) and the mission gate
+    abstain (turning it off). Both now say it is the caller's bug."""
+    with pytest.raises(TypeError, match=r"\(N, 2\)"):
+        check_fit_self_consistency(VER_ORIGIN, VER_AXIS, VER_K, bad)
+    with pytest.raises(TypeError, match=r"\(N, 2\)"):
+        check_calibration_describes_mission(VER_ORIGIN, VER_AXIS, VER_K, bad)
+
+
+def test_malformed_observations_are_a_type_error_not_a_refusal():
+    with pytest.raises(TypeError, match=r"\(N, 3\)"):
+        check_observation_geometry(np.zeros((10, 2)))
+
+
+def test_a_non_finite_dot_is_dropped_before_judging():
+    """A NaN dot used to make the span NaN (so no abstention) and then crash
+    the SVD; it is dropped, and the gate judges the rest."""
+    dots = _ver_dots(np.linspace(0.6, 3.0, 20))
+    dots[3] = [np.nan, np.nan]
+    assert check_fit_self_consistency(VER_ORIGIN, VER_AXIS, VER_K, dots) == PASSED
+    assert check_calibration_describes_mission(VER_ORIGIN, VER_AXIS, VER_K, dots) == PASSED
+
+
+@pytest.mark.parametrize(
+    "axis",
+    [np.array([1.0, 0.0, 0.0]), np.array([0.6, 0.8, 1e-6]), np.array([np.nan, 0.0, 1.0])],
+    ids=["in-z0-plane", "nearly", "nan"],
+)
+def test_an_axis_with_no_image_is_refused_not_crashed(axis):
+    """An axis in or near the z=0 plane cannot cross the working depths; it
+    used to divide by ~0 and crash the SVD."""
+    dots = _ver_dots(np.linspace(0.6, 3.0, 20))
+    with pytest.raises(CalibrationInconsistentError, match="no image"):
+        check_fit_self_consistency(VER_ORIGIN, axis, VER_K, dots)
+    with pytest.raises(CalibrationDoesNotDescribeDiveError, match="no image"):
+        check_calibration_describes_mission(VER_ORIGIN, axis, VER_K, dots)
