@@ -304,6 +304,11 @@ dependencies = [
 denoise = [
     { name = "bm3d" },
 ]
+headtail-keypoints = [
+    { name = "huggingface-hub" },
+    { name = "timm" },
+    { name = "torch" },
+]
 laser-detector = [
     { name = "huggingface-hub" },
     { name = "segmentation-models-pytorch" },
@@ -327,6 +332,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "bm3d", marker = "extra == 'denoise'", specifier = ">=4.0" },
+    { name = "huggingface-hub", marker = "extra == 'headtail-keypoints'", specifier = ">=0.26" },
     { name = "huggingface-hub", marker = "extra == 'laser-detector'", specifier = ">=0.26" },
     { name = "huggingface-hub", marker = "extra == 'slate'", specifier = ">=0.26" },
     { name = "numpy", specifier = ">=2.3.5" },
@@ -335,10 +341,12 @@ requires-dist = [
     { name = "scikit-image", specifier = ">=0.25.2" },
     { name = "scipy", specifier = ">=1.13" },
     { name = "segmentation-models-pytorch", marker = "extra == 'laser-detector'", specifier = ">=0.4" },
+    { name = "timm", marker = "extra == 'headtail-keypoints'", specifier = ">=1.0" },
+    { name = "torch", marker = "extra == 'headtail-keypoints'", specifier = ">=2.5" },
     { name = "torch", marker = "extra == 'laser-detector'", specifier = ">=2.4" },
     { name = "torch", marker = "extra == 'slate'", specifier = ">=2.4" },
 ]
-provides-extras = ["denoise", "laser-detector", "rectified", "slate"]
+provides-extras = ["denoise", "headtail-keypoints", "laser-detector", "rectified", "slate"]
 
 [package.metadata.requires-dev]
 dev = [

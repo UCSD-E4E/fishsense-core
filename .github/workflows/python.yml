@@ -72,3 +72,38 @@ jobs:
     - name: Show hang dump
       if: failure()
       run: cat "${FISHSENSE_HANG_DUMP}" 2>/dev/null || echo "(no hang dump — failure was not a watchdog timeout)"
+
+  # The torch-backed tests: the SAM 3.1 adapter's autocast and the keypoint
+  # model's lift, batching, network shape and checkpoint round trip. They skip
+  # wherever torch is absent, which is the base job above, so this job installs
+  # CPU torch + timm (the [headtail-keypoints] extra, from the CPU index so the
+  # runner is not asked for a CUDA runtime) and runs only the files that use
+  # them. Any skip here is a failure (both files skip only for want of torch or
+  # timm), so the step greps the skip summary. `shell: bash` is what turns on
+  # pipefail: the default `bash -e` takes the pipeline's status from `tee`, and
+  # a failing pytest would go green.
+  test-ubuntu-torch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      OPENBLAS_NUM_THREADS: "1"
+      OMP_NUM_THREADS: "1"
+      FISHSENSE_ORT_INTRA_THREADS: "1"
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python 3.13
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.13"
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libopenblas-dev
+        python -m pip install --upgrade pip uv
+        uv sync --group dev
+        uv pip install --torch-backend=cpu torch timm
+    - name: Run the torch-backed tests
+      shell: bash
+      run: |
+        uv run --no-sync pytest --timeout=300 -rs tests/test_headtail_keypoints.py tests/test_fish_at_dot.py | tee pytest.log
+        if grep -q "^SKIPPED" pytest.log; then echo "torch-backed tests skipped"; exit 1; fi

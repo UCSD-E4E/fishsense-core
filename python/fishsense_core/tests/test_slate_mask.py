@@ -102,14 +102,11 @@ class TestFromPretrained:
         assert DEFAULT_CHECKPOINT.endswith(".pt")
 
     def test_missing_hub_raises_a_pointed_import_error(self, monkeypatch):
-        import builtins
-        real = builtins.__import__
+        import sys
 
-        def blocked(name, *a, **kw):
-            if name == "huggingface_hub":
-                raise ImportError("no hub")
-            return real(name, *a, **kw)
-
-        monkeypatch.setattr(builtins, "__import__", blocked)
+        # A None entry makes any import of the name raise ImportError, whether
+        # it goes through the import statement or importlib.import_module
+        # (which `fishsense_core._optional.require` uses).
+        monkeypatch.setitem(sys.modules, "huggingface_hub", None)
         with pytest.raises(ImportError, match=r"fishsense_core\[slate\]"):
             BoardMasker.from_pretrained()
