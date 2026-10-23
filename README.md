@@ -80,8 +80,9 @@ fish.status, fish.head, fish.tail, fish.mask_bbox   # frame pixels; abstentions 
 # per-fish p90 estimator -- see the module docstring before swapping it in.
 from fishsense_core.fish.headtail_keypoints import HeadTailKeypointDetector
 detector = HeadTailKeypointDetector.from_checkpoint("best_length.pt")
-kp = detector.predict(rectified_bgr, fish.mask_bbox)
-kp.head, kp.tail, kp.confidence, kp.length_px
+if fish.mask_bbox is not None:            # None on every abstention
+    kp = detector.predict(rectified_bgr, fish.mask_bbox)
+    kp.head, kp.tail, kp.confidence, kp.length_px
 ```
 
 Rust functions are available directly through `fishsense_core._native` (e.g. `_native.laser.calibrate_laser`). Higher-level Python wrappers live in `fishsense_core.*`.

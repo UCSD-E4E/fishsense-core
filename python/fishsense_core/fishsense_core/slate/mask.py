@@ -190,14 +190,9 @@ class BoardMasker:
         than CUDA-when-available: this model is 202 ms/frame on CPU and the
         activity is deliberately not GPU-scheduled.
         """
-        try:
-            from huggingface_hub import hf_hub_download  # noqa: PLC0415
-        except ImportError as exc:  # pragma: no cover - depends on extras
-            raise ImportError(
-                "from_pretrained requires huggingface_hub. Install the "
-                "optional extra: pip install 'fishsense_core[slate]'"
-            ) from exc
+        from fishsense_core._optional import require
 
+        hf_hub_download = require("huggingface_hub", "slate", "from_pretrained").hf_hub_download
         path = hf_hub_download(repo_id, filename, revision=revision)
         return cls.from_checkpoint(path, device=device, threads=threads)
 

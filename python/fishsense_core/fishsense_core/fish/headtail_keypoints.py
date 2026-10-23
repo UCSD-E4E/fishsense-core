@@ -31,6 +31,14 @@ the model and the rule see the same fish chosen the same way. A different
 crop is a different input distribution; ``test_headtail_keypoints.py`` pins
 the rule to the experiment's stored crops.
 
+**One input difference is unmeasured.** The experiment's crops were JPEG
+files: cut from staged frames that were themselves JPEGs, and encoded again
+(``sam_boxes.py``, ``cv2.imencode``). :meth:`HeadTailKeypointDetector.predict`
+is fed the decoded rectified frame, with no compression at all. The numbers
+above were measured on the double-JPEG input; the gap to production's input
+has not been, and anyone swapping the model in on those numbers should
+measure it (or feed it a JPEG round trip).
+
 Input: the crop warped to :data:`IN` x :data:`IN` (longer side fills, grey
 :data:`PAD_VALUE` outside). Backbone: timm ConvNeXt-Tiny, last stage (stride
 32). Head (SimCC): per keypoint a classification over ``IN * K`` bins for x and
@@ -62,6 +70,7 @@ from typing import TYPE_CHECKING, Any, Sequence, Tuple
 import cv2
 import numpy as np
 
+from fishsense_core._optional import require
 from fishsense_core.models import Manifest, WeightStore, fetch
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -93,6 +102,7 @@ _log = logging.getLogger(__name__)
 
 #: Manifest name of the checkpoint (``fishsense_core.models``).
 MODEL_NAME = "headtail-keypoints"
+_EXTRA = "headtail-keypoints"
 
 #: Network input side, SimCC bins per pixel, decode window in bins, keypoints.
 IN, K, RADIUS, NK = 512, 2, 6, 2
@@ -211,41 +221,47 @@ def decode(logits: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     return coord, p.max(-1)
 
 
+def _check_image(img: Any, what: str) -> np.ndarray:
+    """The contract every image here shares, enforced: ``(H, W, 3)`` uint8
+    BGR with pixels in it. A float or 16-bit frame would be normalised with
+    the uint8 ImageNet constants and give plausible garbage, so it is
+    refused rather than run."""
+    arr = np.asarray(img)
+    if arr.ndim != 3 or arr.shape[2] != 3:
+        raise ValueError(f"{what} must be (H, W, 3) BGR; got shape {arr.shape}")
+    if arr.dtype != np.uint8:
+        raise TypeError(f"{what} must be uint8 (0-255), as the model was trained; got {arr.dtype}")
+    if arr.shape[0] == 0 or arr.shape[1] == 0:
+        raise ValueError(f"{what} is empty: shape {arr.shape}")
+    return arr
+
+
 # ── the model ───────────────────────────────────────────────────────────────
 
 
-def _require_torch() -> Any:
-    try:
-        import torch
-    except ImportError as exc:  # pragma: no cover - depends on extras
-        raise ImportError(
-            "HeadTailKeypointDetector requires torch and timm. Install the "
-            "optional extra: pip install 'fishsense_core[headtail-keypoints]'"
-        ) from exc
-    return torch
+_SIMCC: Any = None
 
 
-def build_model(pretrained: bool = False) -> "torch.nn.Module":
-    """The SimCC network, exactly as trained: ConvNeXt-Tiny's last stage, a
-    7x7 reduce to 32 channels per keypoint, a per-keypoint MLP, and two
-    classifiers over ``IN * K`` bins. ``pretrained`` fetches the backbone's
-    ImageNet weights (training's start); a checkpoint load overwrites them."""
-    torch = _require_torch()
-    try:
-        import timm
-    except ImportError as exc:  # pragma: no cover - depends on extras
-        raise ImportError(
-            "HeadTailKeypointDetector requires timm. Install the optional "
-            "extra: pip install 'fishsense_core[headtail-keypoints]'"
-        ) from exc
+def _simcc_class() -> Any:
+    """The network class, defined once torch and timm are importable and then
+    kept: one class, so instances compare by type and a whole module
+    pickles (``torch.save(module)`` finds it at ``headtail_keypoints.SimCC``
+    through the module's ``__getattr__``)."""
+    global _SIMCC  # pylint: disable=global-statement
+    if _SIMCC is not None:
+        return _SIMCC
+    torch = require("torch", _EXTRA, "HeadTailKeypointDetector")
+    timm = require("timm", _EXTRA, "HeadTailKeypointDetector")
     nn = torch.nn
 
-    # Without torch installed (CI's lint job) pylint cannot see nn.Module's
-    # methods and counts the class as having one.
     class SimCC(nn.Module):  # pylint: disable=too-few-public-methods
-        """``forward(x) -> (logits_x, logits_y)``, each ``(B, NK, IN * K)``."""
+        """``forward(x) -> (logits_x, logits_y)``, each ``(B, NK, IN * K)``:
+        ConvNeXt-Tiny's last stage, a 7x7 reduce to 32 channels per
+        keypoint, a per-keypoint MLP, and two classifiers over ``IN * K``
+        bins. ``pretrained`` fetches the backbone's ImageNet weights
+        (training's start); a checkpoint load overwrites them."""
 
-        def __init__(self):
+        def __init__(self, pretrained: bool = False):
             super().__init__()
             self.backbone = timm.create_model(
                 BACKBONE, pretrained=pretrained, features_only=True, out_indices=[3]
@@ -265,7 +281,47 @@ def build_model(pretrained: bool = False) -> "torch.nn.Module":
             h = self.mlp(f)
             return self.cls_x(h), self.cls_y(h)
 
-    return SimCC()
+    SimCC.__module__ = __name__
+    SimCC.__qualname__ = SimCC.__name__
+    _SIMCC = SimCC
+    return SimCC
+
+
+def __getattr__(name: str) -> Any:
+    """``headtail_keypoints.SimCC``: the network class, built on first use.
+    This is how pickle finds it when a whole module is saved."""
+    if name == "SimCC":
+        return _simcc_class()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def build_model(pretrained: bool = False) -> "torch.nn.Module":
+    """The SimCC network, exactly as trained. ``pretrained`` fetches the
+    backbone's ImageNet weights; a checkpoint load overwrites them."""
+    return _simcc_class()(pretrained=pretrained)
+
+
+def _checkpoint_safe_globals() -> list:
+    """What the checkpoint's non-tensor payload (``epoch``, ``length_val``:
+    numpy scalars from pandas) needs the restricted unpickler to allow,
+    beyond its defaults. Resolved by name so a numpy without one of them
+    (the ``numpy.core`` path is numpy 1's) is not an error."""
+    allowed = []
+    for path in (
+        "numpy.core.multiarray.scalar",
+        "numpy._core.multiarray.scalar",
+        "numpy.dtype",
+        "numpy.dtypes.Float64DType",
+        "numpy.dtypes.Float32DType",
+        "numpy.dtypes.Int64DType",
+    ):
+        module_name, _, attr = path.rpartition(".")
+        try:
+            obj = getattr(__import__(module_name, fromlist=[attr]), attr)
+        except (ImportError, AttributeError):
+            continue
+        allowed.append(obj)
+    return allowed
 
 
 @dataclass(frozen=True)
@@ -288,14 +344,14 @@ class HeadTailKeypoints:
 class HeadTailKeypointDetector:
     """The trained SimCC model, from a crop to snout and fork.
 
-    Build it with :meth:`from_store` (the pinned checkpoint, verified) or
-    :meth:`from_checkpoint`; then :meth:`predict` a frame given the fish's
+    Build it with :meth:`from_store` (the pinned checkpoint, verified by hash)
+    or :meth:`from_checkpoint`; then :meth:`predict` a frame given the fish's
     SAM mask box, or :meth:`predict_crops` crops already cut by
     :func:`crop_from_box`.
     """
 
     def __init__(self, module: "torch.nn.Module", device: "torch.device | str | None" = None):
-        torch = _require_torch()
+        torch = require("torch", _EXTRA, "HeadTailKeypointDetector")
         self._torch = torch
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -307,11 +363,19 @@ class HeadTailKeypointDetector:
         cls, path: str | os.PathLike[str], *, device: "torch.device | str | None" = None
     ) -> "HeadTailKeypointDetector":
         """Load the experiment's checkpoint format, ``{"model": state_dict,
-        "epoch": int, "length_val": {...}}`` (``best_length.pt``). The state
-        dict is loaded strictly: a checkpoint for another design fails here,
-        not quietly at the output."""
-        torch = _require_torch()
-        checkpoint = torch.load(Path(path), map_location="cpu", weights_only=False)
+        "epoch": int, "length_val": {...}}`` (``best_length.pt``).
+
+        The file is read with torch's restricted unpickler
+        (``weights_only=True``, plus the numpy scalar types the payload
+        holds), so a tampered checkpoint cannot run code on load; it fails to
+        unpickle. It is still **not verified** against the manifest: that is
+        :meth:`from_store`'s job, and the path to use for bytes from a shared
+        bucket or repo. The state dict is loaded strictly, so a checkpoint for
+        another design fails here, not quietly at the output.
+        """
+        torch = require("torch", _EXTRA, "HeadTailKeypointDetector")
+        with torch.serialization.safe_globals(_checkpoint_safe_globals()):
+            checkpoint = torch.load(Path(path), map_location="cpu", weights_only=True)
         module = build_model(pretrained=False)
         module.load_state_dict(checkpoint["model"], strict=True)
         _log.info(
@@ -358,9 +422,15 @@ class HeadTailKeypointDetector:
         self, crops: Sequence[np.ndarray], batch: int = 32
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Keypoints ``(N, 2, 2)`` in crop pixels (``[snout, fork]``, each
-        ``(x, y)``) and confidence ``(N,)`` for BGR crops cut by
-        :func:`crop_from_box`."""
+        ``(x, y)``) and confidence ``(N,)`` for BGR uint8 crops cut by
+        :func:`crop_from_box`.
+
+        Raises:
+            TypeError: A crop is not uint8.
+            ValueError: A crop is not ``(H, W, 3)``, or is empty.
+        """
         torch = self._torch
+        crops = [_check_image(c, f"crop {i}") for i, c in enumerate(crops)]
         keypoints, confidences = [], []
         with torch.no_grad():
             for start in range(0, len(crops), batch):
@@ -381,12 +451,34 @@ class HeadTailKeypointDetector:
             return np.zeros((0, NK, 2)), np.zeros((0,))
         return np.array(keypoints), np.concatenate(confidences)
 
-    def predict(self, frame_bgr: np.ndarray, mask_bbox: Sequence[float]) -> HeadTailKeypoints:
+    def predict(
+        self, frame_bgr: np.ndarray, mask_bbox: Sequence[float] | None
+    ) -> HeadTailKeypoints:
         """Snout and fork of the fish whose SAM mask box is ``mask_bbox``, in
         frame pixels. ``frame_bgr`` is the rectified frame the box was found
-        on (``FishAtDot.mask_bbox``)."""
+        on, ``(H, W, 3)`` uint8 BGR; ``mask_bbox`` is ``FishAtDot.mask_bbox``.
+
+        Raises:
+            ValueError: ``mask_bbox`` is None (the stage abstained: check
+                ``FishAtDot.status`` before calling), or the box lies outside
+                the frame so the crop is empty, or the frame is not
+                ``(H, W, 3)``.
+            TypeError: The frame is not uint8.
+        """
+        if mask_bbox is None:
+            raise ValueError(
+                "mask_bbox is None: the stage abstained on this frame (no fish "
+                "under the dot), so there is nothing to keypoint. Check "
+                "FishAtDot.status before calling predict."
+            )
+        frame_bgr = _check_image(frame_bgr, "frame")
         height, width = frame_bgr.shape[:2]
         x0, y0, x1, y1 = crop_from_box(mask_bbox, width, height)
+        if x1 <= x0 or y1 <= y0:
+            raise ValueError(
+                f"mask_bbox {tuple(mask_bbox)} lies outside the {width}x{height} frame: "
+                "the crop is empty. Is this the frame the box was found on?"
+            )
         crop = np.ascontiguousarray(frame_bgr[y0:y1, x0:x1])
         points, confidence = self.predict_crops([crop])
         head, tail = points[0]

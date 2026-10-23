@@ -8,6 +8,8 @@ need torch (and timm for the real network); they skip without the extra.
 from __future__ import annotations
 
 import hashlib
+import io
+import pickle
 import sys
 import types
 from pathlib import Path
@@ -251,6 +253,74 @@ def test_predict_crops_of_nothing_is_empty(torch):
     assert points.shape == (0, NK, 2) and conf.shape == (0,)
 
 
+class TestPredictRefusesWhatItCannotMeasure:
+    """Each of these used to be an opaque failure (a TypeError on unpacking
+    None, an OpenCV assertion, or no failure at all and garbage keypoints)."""
+
+    @pytest.fixture(autouse=True)
+    def _det(self, torch):
+        self.det = HeadTailKeypointDetector(_Peaked(torch, [(10, 10), (20, 20)]), device="cpu")
+        self.frame = np.zeros((300, 400, 3), dtype=np.uint8)
+
+    def test_an_abstentions_none_box_is_a_clear_error(self):
+        """FishAtDot.mask_bbox is None on every abstention; the README's
+        flow passes it straight in."""
+        with pytest.raises(ValueError, match="abstained"):
+            self.det.predict(self.frame, None)
+
+    def test_a_box_outside_the_frame_is_named(self):
+        with pytest.raises(ValueError, match="outside the 400x300 frame"):
+            self.det.predict(self.frame, (500, 500, 600, 600))
+
+    def test_a_float_frame_is_refused_not_normalised_as_uint8(self):
+        with pytest.raises(TypeError, match="uint8"):
+            self.det.predict(self.frame.astype(np.float32), (100, 100, 200, 150))
+
+    def test_a_uint16_frame_is_refused(self):
+        with pytest.raises(TypeError, match="uint8"):
+            self.det.predict(self.frame.astype(np.uint16), (100, 100, 200, 150))
+
+    def test_a_grey_frame_is_refused(self):
+        with pytest.raises(ValueError, match=r"\(H, W, 3\)"):
+            self.det.predict(self.frame[:, :, 0], (100, 100, 200, 150))
+
+    def test_predict_crops_checks_each_crop(self):
+        good = np.zeros((50, 80, 3), dtype=np.uint8)
+        with pytest.raises(ValueError, match="crop 1 is empty"):
+            self.det.predict_crops([good, np.zeros((0, 80, 3), dtype=np.uint8)])
+        with pytest.raises(TypeError, match="crop 0"):
+            self.det.predict_crops([good.astype(np.float32)])
+
+
+class TestTheNetworkIsOneClass:
+    """The experiment had SimCC at module level. Defined inside build_model
+    it would be a new class per call: isinstance across instances fails and
+    a whole module cannot be pickled or torch.save'd."""
+
+    @pytest.fixture(autouse=True)
+    def _timm(self, torch):
+        pytest.importorskip("timm")
+
+    def test_two_builds_share_a_type(self):
+        assert type(sut.build_model()) is type(sut.build_model())
+        assert type(sut.build_model()) is sut.SimCC
+
+    def test_the_class_is_found_by_its_pickled_name(self):
+        klass = sut.SimCC
+        assert (klass.__module__, klass.__qualname__) == (sut.__name__, "SimCC")
+        assert pickle.loads(pickle.dumps(klass)) is klass
+
+    def test_a_whole_module_round_trips_through_torch_save(self, torch):
+        module = sut.build_model()
+        buf = io.BytesIO()
+        torch.save(module, buf)
+        buf.seek(0)
+        back = torch.load(buf, weights_only=False)
+        assert type(back) is sut.SimCC
+        for a, b in zip(back.state_dict().values(), module.state_dict().values()):
+            assert torch.equal(a, b)
+
+
 def test_the_real_network_has_the_checkpoints_shape(torch):
     """Random weights, one forward: the module is the trained design (its
     state dict loads strictly), and the head emits IN*K bins per keypoint."""
@@ -270,7 +340,10 @@ def test_from_checkpoint_loads_the_experiments_format_strictly(torch, tmp_path):
     pytest.importorskip("timm")
     module = sut.build_model(pretrained=False)
     path = tmp_path / "best_length.pt"
-    torch.save({"model": module.state_dict(), "epoch": 12, "length_val": {"mean_abs_d": 0.0267}}, path)
+    # length_val is a pandas summary: numpy scalars, which the restricted
+    # unpickler refuses unless allowed (they are).
+    length_val = {"mean_abs_d": np.float64(0.0267), "within10": np.float64(0.951), "n": np.int64(1739)}
+    torch.save({"model": module.state_dict(), "epoch": 12, "length_val": length_val}, path)
 
     det = HeadTailKeypointDetector.from_checkpoint(path, device="cpu")
     assert det.device.type == "cpu"
@@ -279,6 +352,23 @@ def test_from_checkpoint_loads_the_experiments_format_strictly(torch, tmp_path):
 
     torch.save({"model": {"cls_x.weight": torch.zeros(1)}, "epoch": 1}, path)
     with pytest.raises(RuntimeError):
+        HeadTailKeypointDetector.from_checkpoint(path, device="cpu")
+
+
+class _Payload:  # pylint: disable=too-few-public-methods
+    """Any class the unpickler was not told about stands for a tampered file."""
+
+    def __reduce__(self):
+        return (_Payload, ())
+
+
+def test_from_checkpoint_does_not_unpickle_arbitrary_objects(torch, tmp_path):
+    """A .pt file is a pickle; with weights_only=False a tampered one runs
+    code on load. The restricted unpickler refuses anything but tensors,
+    containers and the numpy scalars the payload needs."""
+    path = tmp_path / "tampered.pt"
+    torch.save({"model": {}, "epoch": 1, "evil": _Payload()}, path)
+    with pytest.raises(pickle.UnpicklingError):
         HeadTailKeypointDetector.from_checkpoint(path, device="cpu")
 
 
@@ -351,6 +441,7 @@ def test_importable_without_torch(monkeypatch):
     """The crop rule and the decode are numpy; the extra loads on first use."""
     monkeypatch.setitem(sys.modules, "torch", None)
     monkeypatch.setitem(sys.modules, "timm", None)
+    monkeypatch.setattr(sut, "_SIMCC", None)  # forget a class an earlier test built
     assert crop_from_box((0, 0, 10, 10), 100, 100) == (0, 0, 79, 79)
     with pytest.raises(ImportError, match="headtail-keypoints"):
         sut.build_model()

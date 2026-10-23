@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, Any
 import cv2
 import numpy as np
 
+from fishsense_core._optional import require
 from fishsense_core.camera_intrinsics import CameraIntrinsics
 from fishsense_core.models import Manifest, WeightStore, builtin_manifest, fetch
 
@@ -146,14 +147,7 @@ DEFAULT_PRESENCE_HIDDEN = 128
 
 def _require_torch() -> Any:
     """Import torch, or raise with an actionable message."""
-    try:
-        import torch  # noqa: PLC0415 - optional heavy dependency
-    except ImportError as exc:  # pragma: no cover - depends on install extras
-        raise ImportError(
-            "The laser detector requires PyTorch. Install the optional extra: "
-            "pip install 'fishsense_core[laser-detector]'"
-        ) from exc
-    return torch
+    return require("torch", "laser-detector", "The laser detector")
 
 
 # --------------------------------------------------------------------------
