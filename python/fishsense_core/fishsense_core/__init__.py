@@ -21,7 +21,8 @@ def _preload_nvidia_libs() -> None:
     "cold" Python process (no torch/etc already loaded), the dynamic loader
     can't find those libs even though they're sitting in
     ``site-packages/nvidia/*/lib``. We replicate what torch's ``__init__``
-    does: walk the ``nvidia/`` subpackages and ``dlopen`` each ``.so*`` with
+    does: ``dlopen`` a fixed list of runtime libraries (`_CUDA_RUNTIME_LIBS`),
+    in dependency order, from the ``nvidia/`` subpackages with
     ``RTLD_GLOBAL`` so symbols are visible to subsequent loads.
 
     Failures are intentionally swallowed: this is a best-effort preload, and
@@ -31,10 +32,12 @@ def _preload_nvidia_libs() -> None:
     ``import fishsense_core`` fails — so discovery is guarded too, not just
     the individual ``dlopen`` calls.
 
-    ``libnvblas`` is skipped. It is not a runtime dependency of anything but a
-    BLAS *interposer*: global, its ``sgemm_`` & co. shadow every CPU BLAS in
-    the process, and with no ``nvblas.conf`` it has no CPU fallback, so the
-    next CPU GEMM (torch's convolution) calls a null pointer.
+    A list, not every ``.so*`` in the tree: the wheels also ship interposers.
+    ``libnvblas``, global, shadows every CPU BLAS in the process with its
+    ``sgemm_`` & co., and with no ``nvblas.conf`` it has no CPU fallback, so
+    the next CPU GEMM (torch's convolution) called a null pointer;
+    ``libcufftw`` does the same to FFTW. Nor does ORT need nvshmem's MPI/PMI
+    bootstraps or the profiler libraries.
     """
     if not sys.platform.startswith("linux"):
         return
@@ -49,18 +52,38 @@ def _preload_nvidia_libs() -> None:
     except Exception:  # pylint: disable=broad-except
         return
 
-    for root in roots:
-        try:
-            libs = sorted(glob(os.path.join(root, "*", "lib", "*.so*")))
-        except OSError:
-            continue
-        for lib in libs:
-            if os.path.basename(lib).startswith("libnvblas"):
-                continue
+    for pattern in _CUDA_RUNTIME_LIBS:
+        for root in roots:
             try:
-                ctypes.CDLL(lib, mode=ctypes.RTLD_GLOBAL)
+                libs = sorted(glob(os.path.join(root, "*", "lib", pattern)))
             except OSError:
-                pass
+                continue
+            for lib in libs:
+                try:
+                    ctypes.CDLL(lib, mode=ctypes.RTLD_GLOBAL)
+                except OSError:
+                    pass
+
+
+#: What ORT's CUDA provider loads, dependencies first: cuBLAS needs cuBLASLt
+#: (else it resolves one by RUNPATH, maybe a mismatched system copy, as
+#: torch's list notes), cuSPARSE nvJitLink, cuSOLVER both. cuDNN 9 dlopens
+#: its sub-libraries itself, from its own $ORIGIN; they are listed anyway so
+#: it loads as it always has. Covers the cu12 layout (one package per
+#: library) and cu13's (all under ``nvidia/cu13/lib``).
+_CUDA_RUNTIME_LIBS = (
+    "libcudart.so*",
+    "libnvJitLink.so*",
+    "libcublasLt.so*",
+    "libcublas.so*",
+    "libcusparse.so*",
+    "libcusolver.so*",
+    "libcufft.so*",
+    "libcurand.so*",
+    "libnvrtc.so*",
+    "libnvrtc-builtins.so*",
+    "libcudnn*.so*",
+)
 
 
 def _nvidia_search_roots(nvidia) -> list:
