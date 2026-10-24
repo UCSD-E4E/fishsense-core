@@ -54,11 +54,20 @@ def calibrate_laser(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     Delegates to the native Rust implementation.
 
     Args:
-        points: (N, 3) float32 array of observed laser points.
+        points: (N, 3) observed laser points, metres. Any real dtype: they
+            are cast to the float32 the native kernel takes, so the float64
+            :func:`fishsense_core.calibration_checks.trim_outlying_observations`
+            returns can be passed straight in.
 
     Returns:
         A ``(origin, orientation)`` tuple of 1-D float32 arrays.
+
+    Raises:
+        TypeError: ``points`` is not an (N, 3) array.
     """
+    points = np.ascontiguousarray(points, dtype=np.float32)
+    if points.ndim != 2 or points.shape[1] != 3:
+        raise TypeError(f"points must be an (N, 3) array, got shape {points.shape}")
     _log.debug("calibrate_laser called with %d points", len(points))
     origin, orientation = _native.laser.calibrate_laser(points)  # pylint: disable=c-extension-no-member
     _log.debug(
