@@ -106,6 +106,33 @@ def test_preload_actually_loads_libs_from_namespace_path(monkeypatch, tmp_path):
     ]
 
 
+def test_preload_skips_nvblas(monkeypatch, tmp_path):
+    """Regression: NVBLAS is a BLAS *interposer*, not a CUDA runtime library.
+
+    Loaded with RTLD_GLOBAL, its `sgemm_` & co. shadow every CPU BLAS, and with
+    no `nvblas.conf` it has no CPU fallback: torch's CPU convolution then calls
+    a null pointer (`tests/test_slate_mask.py` segfaulted inside
+    `libnvblas.so.13`, nvidia-cublas cu13). Nothing fishsense_core loads links
+    against it.
+    """
+    nvidia_root = _fake_nvidia_tree(tmp_path)
+    (nvidia_root / "cublas" / "lib" / "libnvblas.so.12").write_bytes(b"")
+    cu13 = nvidia_root / "cu13" / "lib"
+    cu13.mkdir(parents=True)
+    (cu13 / "libnvblas.so.13").write_bytes(b"")
+    monkeypatch.setitem(sys.modules, "nvidia", _namespace_module(nvidia_root))
+
+    loaded = []
+    monkeypatch.setattr(ctypes, "CDLL", lambda path, mode=0: loaded.append(path))
+
+    fishsense_core._preload_nvidia_libs()  # pylint: disable=protected-access
+
+    assert sorted(os.path.basename(p) for p in loaded) == [
+        "libcublas.so.12",
+        "libcudnn.so.9",
+    ]
+
+
 def test_preload_falls_back_to_file_for_regular_package(monkeypatch, tmp_path):
     """A conventional (non-namespace) `nvidia` package still resolves."""
     nvidia_root = _fake_nvidia_tree(tmp_path)
