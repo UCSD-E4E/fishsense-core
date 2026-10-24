@@ -66,7 +66,42 @@ python/fishsense_core/
                                    #   dive_laser_lines rows (fishsense-lite's copy). Two
                                    #   deliberate breaks: label_noise_mad (lite's was ~0.59
                                    #   sigma), and line_confidence is 0, not inf, when the
-                                   #   inliers sit on < MIN_DISTINCT_LOCATIONS (3) pixels
+                                   #   inliers sit on < MIN_DISTINCT_LOCATIONS (3) pixels.
+                                   #   ransac_line / consensus_line expose the search,
+                                   #   parametrised, for services' other two fitters
+    laser_reflection.py            # Two parallel lines = the laser and its specular
+                                   #   reflection (prod dive 77); companion to line_fit
+    laser_color.py                 # Red vs green read off the dot's pixels. The
+                                   #   inverse point map is laser.unrectify_prediction,
+                                   #   beside rectify_prediction (sensor <-> rectified)
+    calibration_checks.py          # The guards calibrate_laser needs. Order: refuse
+                                   #   below a minimum count, trim_outlying_observations,
+                                   #   calibrate_laser, then the gates, observation
+                                   #   geometry first (then self-consistency, baseline,
+                                   #   describes-the-dive). Refusals are ValueErrors,
+                                   #   malformed input TypeError; remedies= is the
+                                   #   caller's message suffix
+    size_constancy.py              # Label-free laser calibration by size constancy
+                                   #   (no slate size, no labels): vanishing position
+                                   #   along the dive line -> beam. The one estimator and
+                                   #   beam services' automatic and shadow tracks both
+                                   #   used; the shadow stage's evaluation metrics
+                                   #   (angle errors vs a reference) stay in services
+    checkerboard.py                # Checkerboard corners paired with board coordinates,
+                                   #   feeding plane.plane_from_correspondences. Seeds
+                                   #   OpenCV's per-thread RNG (seed=0) before detecting,
+                                   #   so occluded boards detect the same way every call;
+                                   #   a checker-parity gate refuses 2x-pitch lattices
+    plane.py                       # Board plane: pose_from_correspondences (the one
+                                   #   solvePnP, on RECTIFIED points), plane_from_pose,
+                                   #   plane_from_correspondences, plane_difference,
+                                   #   laser_point_on_plane
+    world_point.py                 # WorldPointHandler wrapper; compute_laser_point
+                                   #   (depth vs range vs residual vs parallax) and
+                                   #   measure_length_at_depth. Gate a dot on
+                                   #   LaserPoint.is_measurable(), not depth > 0 alone:
+                                   #   near the laser's vanishing point the depth is
+                                   #   finite, positive and wrong
     camera_intrinsics.py           # CameraIntrinsics (K + distortion), exported at the
                                    #   package root. Consumers duck-type on its two
                                    #   attributes; nothing may import fishsense_api_sdk
@@ -90,6 +125,15 @@ python/fishsense_core/
 ```
 
 The Python package exposes Rust functions through `fishsense_core._native`. New Rust functions must be registered in `python/fishsense_core/src/lib.rs` before they are callable from Python.
+
+laser_reflection, laser_color, calibration_checks, size_constancy,
+checkerboard, and the line_fit, plane and world_point additions were ported
+from fishsense-services v0.48.0 (and before it fishsense-lite), each
+behaviour-preserving apart from the departures its module docstring lists,
+with the parity check against the original recorded in its PR. Not all are
+pure numpy: plane, checkerboard, size_constancy and laser_color (through the
+detector module's inverse map) need OpenCV, size_constancy SciPy too, and
+world_point wraps the native `WorldPointHandler`, so it needs `_native`.
 
 ## Adding a new algorithm
 
