@@ -223,6 +223,14 @@ Reproduce the reporter's numbers in the test where possible; e.g. the non-unit
 `laser_axis` fix pins `compute_world_point_from_laser` recovering a 1.5 m dot
 that the old code put at 1.35e-4 m.
 
+If `cargo test` can't run (an ILP64 BLAS, see below), lift the new test onto
+the pre-fix file and run it in the scratch crate below:
+
+```bash
+git show HEAD:rust/fishsense-core/src/world_point_handler.rs > /tmp/old.rs
+# ...append the new #[test] to /tmp/old.rs, point the scratch crate at it, run
+```
+
 ## Running tests locally
 
 The dev shell links `openblasCompat`, not nixpkgs' default `openblas`. The
@@ -232,6 +240,17 @@ test SIGSEGV'd on the first `ndarray::dot`. A shell entered from an older
 `flake.nix` still has the ILP64 one: re-enter it, and rebuild `_native`, before
 reading a native segfault as a signal about the current edit.
 `openblas_get_config()` on the loaded `libopenblas.so.0` says which you have.
+
+Where the shell can't be fixed (a non-nix setup with an ILP64 BLAS), a module
+that needs no linear algebra (`world_point_handler.rs`, the geometry helpers)
+still tests in a scratch crate whose only dependency is `ndarray`, with no
+`ndarray-linalg` and so no BLAS:
+
+```rust
+// scratch/src/lib.rs
+#[path = "/abs/path/to/rust/fishsense-core/src/world_point_handler.rs"]
+pub mod world_point_handler;
+```
 
 Python tests need `maturin develop` first, so they can't run against a venv
 whose Python version has no matching `_native` build. Wrapper-level logic
