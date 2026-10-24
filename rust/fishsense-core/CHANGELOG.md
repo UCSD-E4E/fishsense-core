@@ -1,5 +1,25 @@
 # Changelog
 
+## [4.3.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v4.2.0...fishsense-core-v4.3.0) (2026-10-24)
+
+
+### Features
+
+* **calibration:** add checkerboard corner detection paired with board coordinates ([#98](https://github.com/UCSD-E4E/fishsense-core/issues/98)) ([3cc6176](https://github.com/UCSD-E4E/fishsense-core/commit/3cc617687b83909588e59695682e20085d7a30ce))
+* **calibration:** add the size-constancy label-free laser calibration ([#97](https://github.com/UCSD-E4E/fishsense-core/issues/97)) ([34532c5](https://github.com/UCSD-E4E/fishsense-core/commit/34532c5881b08db284b89a637b7adaf18199b9eb))
+* **fish:** gate find_fish_at_dot on SAM's mask score and report it ([#93](https://github.com/UCSD-E4E/fishsense-core/issues/93)) ([34d892e](https://github.com/UCSD-E4E/fishsense-core/commit/34d892e00292d553d863fdc203def93e34b35df1))
+* **laser:** add the outlier trim and self-consistency gates that guard calibrate_laser ([#99](https://github.com/UCSD-E4E/fishsense-core/issues/99)) ([41d86b1](https://github.com/UCSD-E4E/fishsense-core/commit/41d86b1f6595dc354c64953afa8a65b67b1b34a7))
+* **laser:** add two-line (specular reflection) detection beside the line fit ([#92](https://github.com/UCSD-E4E/fishsense-core/issues/92)) ([5ad0aeb](https://github.com/UCSD-E4E/fishsense-core/commit/5ad0aebddfafea7b8e569b54d71c37cda18cb02b))
+* **laser:** expose the 2-D line search as ransac_line and consensus_line ([#100](https://github.com/UCSD-E4E/fishsense-core/issues/100)) ([cc48c2a](https://github.com/UCSD-E4E/fishsense-core/commit/cc48c2aea5651d38e06d926e1bb6db04dbc2b33a))
+* **laser:** read the laser's colour off the dot, and map rectified points back to the sensor ([#94](https://github.com/UCSD-E4E/fishsense-core/issues/94)) ([d439ab2](https://github.com/UCSD-E4E/fishsense-core/commit/d439ab23c0d9034f898d5eec591a191cc583d5c7))
+* **plane:** recover a target's plane from 2-D/3-D correspondences ([#95](https://github.com/UCSD-E4E/fishsense-core/issues/95)) ([5d51a79](https://github.com/UCSD-E4E/fishsense-core/commit/5d51a79847036d8a1aaccc4ae74d6d8a4564bfc2))
+* **world_point:** add the laser point (depth, range, residual) and length-at-depth ([#96](https://github.com/UCSD-E4E/fishsense-core/issues/96)) ([6f6db32](https://github.com/UCSD-E4E/fishsense-core/commit/6f6db323214f6dfb65977ee4169aa40c3fcba5af))
+
+
+### Bug Fixes
+
+* **deps:** bump pyo3 to 0.29 for two security advisories ([#106](https://github.com/UCSD-E4E/fishsense-core/issues/106)) ([d526d53](https://github.com/UCSD-E4E/fishsense-core/commit/d526d53de3ca4489210d1f0196823c32abd7c572))
+
 ## [4.2.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v4.1.0...fishsense-core-v4.2.0) (2026-10-23)
 
 
