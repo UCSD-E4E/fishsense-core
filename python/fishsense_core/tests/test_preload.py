@@ -133,6 +133,38 @@ def test_preload_skips_nvblas(monkeypatch, tmp_path):
     ]
 
 
+def test_preload_loads_only_the_runtime_libraries_in_dependency_order(monkeypatch, tmp_path):
+    """An allowlist, not every `.so` in the tree: the cu13 wheel also ships
+    `libcufftw` (an FFTW interposer, NVBLAS's kind of hijack), nvshmem's
+    MPI/PMI bootstraps and profiler libraries, none of which ORT needs. And
+    cuBLASLt before cuBLAS, which would otherwise resolve one by RUNPATH."""
+    nvidia_root = tmp_path / "nvidia"
+    lib_dir = nvidia_root / "cu13" / "lib"
+    lib_dir.mkdir(parents=True)
+    for lib in (
+        "libcublas.so.13", "libcublasLt.so.13", "libcudart.so.13", "libcufftw.so.12",
+        "libcufft.so.12", "libnvperf_host.so", "libnvrtc.alt.so.13", "libnvrtc.so.13",
+    ):
+        (lib_dir / lib).write_bytes(b"")
+    shmem = nvidia_root / "nvshmem" / "lib"
+    shmem.mkdir(parents=True)
+    (shmem / "nvshmem_bootstrap_mpi.so.3").write_bytes(b"")
+    monkeypatch.setitem(sys.modules, "nvidia", _namespace_module(nvidia_root))
+
+    loaded = []
+    monkeypatch.setattr(ctypes, "CDLL", lambda path, mode=0: loaded.append(path))
+
+    fishsense_core._preload_nvidia_libs()  # pylint: disable=protected-access
+
+    assert [os.path.basename(p) for p in loaded] == [
+        "libcudart.so.13",
+        "libcublasLt.so.13",
+        "libcublas.so.13",
+        "libcufft.so.12",
+        "libnvrtc.so.13",
+    ]
+
+
 def test_preload_falls_back_to_file_for_regular_package(monkeypatch, tmp_path):
     """A conventional (non-namespace) `nvidia` package still resolves."""
     nvidia_root = _fake_nvidia_tree(tmp_path)
