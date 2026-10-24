@@ -16,11 +16,15 @@
         # Native libraries the Rust build links against:
         #   * OpenBLAS — ndarray-linalg's `openblas-system` feature locates it via
         #     pkg-config, and the compiled extension dlopen's it at test/run time.
+        #     `openblasCompat`, not `openblas`: nixpkgs' default is built
+        #     USE64BITINT (ILP64) under the standard `cblas_*` names, while
+        #     cblas-sys passes 32-bit ints, so the first `ndarray::dot` reads
+        #     garbage dimensions and SIGSEGVs. CI's libopenblas-dev is LP64.
         #   * OpenSSL  — reqwest's compile-time model download (build.rs) on Linux.
         # Note: the OpenCV/libclang toolchain is intentionally absent — the crate
         # dropped the `opencv` dependency in favour of pure-Rust image/imageproc.
         nativeLibs = [
-          pkgs.openblas
+          pkgs.openblasCompat
           pkgs.openssl
         ];
       in
