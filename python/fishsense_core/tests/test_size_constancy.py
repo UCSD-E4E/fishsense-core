@@ -523,6 +523,24 @@ def test_registration_recovers_the_scale_about_the_dot():
     assert near >= sc.MIN_PAIR_NEAR
 
 
+def test_registration_refuses_a_similarity_that_collapses_the_object():
+    """Matches that all land on one spot in `b` fit a similarity of scale ~0:
+    a 'size ratio' no two frames of a dive have. Under OpenCV 5 cscw's mission
+    63 features produce two such pairs (log scale -41 and -42), which connect
+    two more frames and move the vanishing position 3900 px."""
+    rng = np.random.default_rng(0)
+    dot = np.array([1000.0, 800.0])
+    xy_a = (dot + rng.uniform(-60, 60, (60, 2))).astype(np.float32)
+    xy_b = (np.array([1500.0, 500.0]) + rng.normal(0, 0.5, (60, 2))).astype(np.float32)
+    desc = rng.normal(size=(60, 128)).astype(np.float32)
+
+    got = sc.pair_scale(
+        sc.FrameFeatures(xy=xy_a, desc=desc), sc.FrameFeatures(xy=xy_b, desc=desc), dot
+    )
+
+    assert got is None
+
+
 def test_registration_needs_features():
     empty = sc.FrameFeatures(xy=np.zeros((0, 2), np.float32), desc=None)
     assert sc.pair_scale(empty, empty, np.array([0.0, 0.0])) is None
@@ -547,7 +565,10 @@ CSCW_FEATURES = _cscw_features()
 @pytest.mark.parametrize("mission", ["63", "94"])
 def test_registration_reproduces_cscws_pairs_from_its_features(mission):
     """The registration itself, against the golden pairs, when the sibling
-    checkout is present."""
+    checkout is present. cscw ran OpenCV 4.14; under 5 the RANSAC refinement
+    moves log scales by up to 1.2e-7 (the vanishing position by 3e-6 px), and
+    near-zero log scales make that a large relative error, so the tolerance
+    is absolute. Pairs carry ~1 %."""
     d = GOLDEN[mission]
     features = []
     for image_id in d["image_ids"]:
@@ -557,7 +578,9 @@ def test_registration_reproduces_cscws_pairs_from_its_features(mission):
     got = sc.pair_scales(features, np.array(d["dots"]))
 
     assert [(p.i, p.j, p.near) for p in got] == [(i, j, n) for i, j, _, n in d["pairs"]]
-    assert [p.log_scale for p in got] == pytest.approx([v for _, _, v, _ in d["pairs"]])
+    assert [p.log_scale for p in got] == pytest.approx(
+        [v for _, _, v, _ in d["pairs"]], rel=0, abs=1e-6
+    )
 
 
 # -- the shadow stage's copy: cscw's size_constancy_sam.py pool, through this module --
