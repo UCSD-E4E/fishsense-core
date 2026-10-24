@@ -30,12 +30,17 @@ def _preload_nvidia_libs() -> None:
     Because it runs at package-import time, it must never be the reason
     ``import fishsense_core`` fails — so discovery is guarded too, not just
     the individual ``dlopen`` calls.
+
+    ``libnvblas`` is skipped. It is not a runtime dependency of anything but a
+    BLAS *interposer*: global, its ``sgemm_`` & co. shadow every CPU BLAS in
+    the process, and with no ``nvblas.conf`` it has no CPU fallback, so the
+    next CPU GEMM (torch's convolution) calls a null pointer.
     """
     if not sys.platform.startswith("linux"):
         return
 
     try:
-        import nvidia  # type: ignore[import-not-found]
+        import nvidia  # type: ignore[import-not-found]  # pylint: disable=import-outside-toplevel
     except ImportError:
         return
 
@@ -50,6 +55,8 @@ def _preload_nvidia_libs() -> None:
         except OSError:
             continue
         for lib in libs:
+            if os.path.basename(lib).startswith("libnvblas"):
+                continue
             try:
                 ctypes.CDLL(lib, mode=ctypes.RTLD_GLOBAL)
             except OSError:
@@ -90,7 +97,7 @@ def _set_ort_dylib_path() -> None:
         return
 
     try:
-        import onnxruntime  # type: ignore[import-not-found]
+        import onnxruntime  # type: ignore[import-not-found]  # pylint: disable=import-outside-toplevel
     except ImportError:
         return
 
