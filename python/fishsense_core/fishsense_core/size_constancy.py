@@ -79,6 +79,14 @@ What the services port changed from cscw, all kept here:
   frame before the trim and was never recomputed, so the frame the trim
   dropped still tilted it; now it is refitted from the kept frames and the
   trim repeated until the kept set stops changing.
+* **A collapsed similarity is no layer** (`MAX_PAIR_LOG_SCALE`). Matches that
+  all land on one spot in the other frame fit a similarity of scale ~0, and
+  it was the object's if it held the dot. OpenCV 5's RANSAC finds two on
+  cscw's own mission 63 features (log scale -41 and -42; 4.14, which made
+  cscw's pairs, did not), and they connect two frames that have no real
+  pair, moving the vanishing position from -2101 to -5988 px. cscw's session
+  114 pair at -37.18 is the same thing. Now such a layer is peeled off and
+  skipped like a reflected one.
 
 **The shadow copy.** fishsense-services v0.48.0 also carries
 `shadow_calibration/fit.py`, a port of cscw-fishsense2027@8312780a
@@ -147,6 +155,10 @@ MIN_INLIERS = 8
 MIN_PAIR_NEAR = 3
 #: RANSAC reprojection threshold, px (register: 6.0).
 RANSAC_PX = 6.0
+#: The largest |log size ratio| a pair may have: 10x, a frame ten times the
+#: other's range. cscw's 1874 golden pairs reach 1.07 (2.9x); a collapsed
+#: similarity reads 6 to 42.
+MAX_PAIR_LOG_SCALE = float(np.log(10.0))
 #: Lowe's ratio (register: 0.75).
 LOWE_RATIO = 0.75
 #: SIFT features per frame (register: 4000).
@@ -291,7 +303,8 @@ def pair_scale(  # pylint: disable=too-many-locals
         det = np.linalg.det(m[:, :2])
         near = int((np.hypot(*(pa[inl] - (x, y)).T) < NEAR_PX).sum())
         log_scale = float(0.5 * np.log(det)) if det > 0 else np.nan
-        if np.isfinite(log_scale) and inside > 0 and (
+        # NaN fails the comparison, so this also skips a reflection.
+        if abs(log_scale) <= MAX_PAIR_LOG_SCALE and inside > 0 and (
             best is None or near > best[1]  # pylint: disable=unsubscriptable-object
         ):
             best = (log_scale, near)
