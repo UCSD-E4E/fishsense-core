@@ -65,10 +65,12 @@ def _stored_vanishing(d, u):
 
 
 # Session 114 is core's one departure from cscw's solve. Frame 7's pairs
-# include one at log scale -37.18 (a factor of ~1e16), which drags its first
-# solve so far that every one of its pairs fails the robust pass. cscw still
-# counted it "connected" and fitted the size the gauge made up for it (its
-# bootstrap SE was 4.41 px); core gives it no size. The other nine sessions are
+# include one at log scale -37.18 (a factor of ~1e16: a collapsed similarity,
+# its inliers 0 px apart in frame 23), which drags cscw's first solve so far
+# that every one of frame 7's pairs fails the robust pass. cscw still counted
+# it "connected" and fitted the size the gauge made up for it (its bootstrap
+# SE was 4.41 px). Core drops that pair before solving (MAX_PAIR_LOG_SCALE),
+# so frame 7 keeps a size from its 16 good pairs. The other nine sessions are
 # cscw's exactly.
 _CSCW_DEPARTS = {"114"}
 
@@ -94,27 +96,42 @@ def test_reproduces_cscws_label_free_fit(mission):
     assert tv - _stored_vanishing(d, u) == pytest.approx(want["err_px"], abs=1e-4)
 
 
-def test_session_114_drops_the_frame_cscw_gave_a_made_up_size():
-    """Every pair through frame 7 fails the robust pass, so it has no size
-    relative to the rest; cscw fitted one anyway. Without it the solve alone
-    lands where cscw's fit only got after its trim dropped the frame."""
+def test_session_114_sizes_frame_7_from_its_good_pairs():
+    """With the collapsed pair out before the first solve, nothing drags it,
+    and frame 7 keeps a size from its other 16 pairs: a real one, where cscw's
+    was made up by the gauge. Its residual SD is the other sessions' (~1 %),
+    not cscw's 2.13."""
     d = GOLDEN["114"]
     dots = np.array(d["dots"])
-    sizes = sc.solve_log_sizes(len(dots), _pairs(d))
-    assert np.flatnonzero(~sizes.connected).tolist() == [7]
-    assert np.isnan(sizes.log_sizes[7])
+    pairs = _pairs(d)
+    assert [(p.i, p.j) for p in pairs if abs(p.log_scale) > sc.MAX_PAIR_LOG_SCALE] == [(7, 23)]
+    sizes = sc.solve_log_sizes(len(dots), pairs)
+    assert sizes.connected.all()
     u = sc.line_direction(d["line"], dots[sizes.connected])
     t = dots[sizes.connected] @ u
     tv = sc.fit_vanishing_position(t, np.exp(sizes.log_sizes[sizes.connected]))
-    assert tv == pytest.approx(-2273.7843259011893, abs=_TV_ABS)
-    assert sizes.residual_sd == pytest.approx(0.009128963751628413, rel=1e-6)
+    assert tv == pytest.approx(-2273.5578981324384, abs=_TV_ABS)
+    assert sizes.residual_sd == pytest.approx(0.009223678952515137, rel=1e-6)
+
+
+def test_the_solve_drops_an_implausible_pair_it_is_handed():
+    """The bound holds for pairs from anywhere, not only `pair_scale`'s: a
+    collapsed pair handed in (log scale -41, OpenCV 5's on mission 63) is out
+    before the first solve, so the sizes are the ones without it."""
+    z = np.linspace(1.0, 3.0, 12)
+    pairs = _exact_pairs(z)
+    clean = sc.solve_log_sizes(12, pairs)
+    dirty = sc.solve_log_sizes(12, [*pairs, sc.PairScale(5, 10, -41.1, 5)])
+    assert dirty.connected.all()
+    assert dirty.log_sizes == pytest.approx(clean.log_sizes, abs=1e-12)
+    assert dirty.residual_sd == pytest.approx(clean.residual_sd, abs=1e-12)
 
 
 def test_bootstrap_reproduces_cscws_standard_errors():
     """cscw draws every session's bootstrap from one generator, in Table 3's
     order; so must this, to reproduce its SEs. Session 114 is last, so the
     draws before it are unchanged; its own SE falls from cscw's 4.41 px to
-    0.73 px once frame 7's made-up size is gone."""
+    0.69 px once frame 7's made-up size is a real one."""
     rng = np.random.default_rng(0)
     for mission in sorted(GOLDEN, key=int):
         d = GOLDEN[mission]
@@ -123,13 +140,13 @@ def test_bootstrap_reproduces_cscws_standard_errors():
         xy = dots[sizes.connected]
         t = xy @ sc.line_direction(d["line"], xy)
         se = sc.bootstrap_se(t, np.exp(sizes.log_sizes[sizes.connected]), rng=rng)
-        want = 0.7291465961104082 if mission in _CSCW_DEPARTS else d["expected"]["se_px"]
+        want = 0.6859628145635921 if mission in _CSCW_DEPARTS else d["expected"]["se_px"]
         assert se == pytest.approx(want, rel=1e-6), mission
 
 
 def test_table_3_all_ten_within_0_05_deg():
-    """cscw: 9 of 10 within 0.05 deg, all within 0.15. Session 114's frame 7
-    (0.129 deg in cscw) is now out of the solve; 0.0485 deg."""
+    """cscw: 9 of 10 within 0.05 deg, all within 0.15. Session 114 (0.129 deg
+    in cscw) is 0.0439 deg with its collapsed pair out of the solve."""
     errors = []
     for d in GOLDEN.values():
         fit = sc.fit_label_free(
@@ -325,7 +342,7 @@ def test_frames_within_the_noise_are_all_kept():
 
 
 @pytest.mark.parametrize("mission", sorted(set(GOLDEN) - {"114"}, key=int))
-def test_the_paper_sessions_lose_no_frame_but_114s_one(mission):
+def test_the_paper_sessions_lose_no_frame(mission):
     """cscw's frames (human dots on labelled slate frames) are consistent, so
     nine of the ten sessions are fitted exactly as cscw fitted them."""
     d = GOLDEN[mission]
@@ -337,7 +354,9 @@ def test_the_paper_sessions_lose_no_frame_but_114s_one(mission):
     assert fit.vanishing_px == pytest.approx(d["expected"]["tv_fit"], abs=1e-4)
 
 
-def test_session_114_loses_one_frame_and_moves_toward_the_known_size_fit():
+def test_session_114_keeps_every_frame_and_moves_toward_the_known_size_fit():
+    """cscw's 6.4 px from the known-size fit was frame 7's made-up size; with
+    a real one it is 2.2 px."""
     d = GOLDEN["114"]
     fit = sc.fit_label_free(
         dots=np.array(d["dots"]), pairs=_pairs(d), camera_matrix=d["camera_matrix"],
@@ -345,8 +364,9 @@ def test_session_114_loses_one_frame_and_moves_toward_the_known_size_fit():
     )  # fmt: skip
     u = np.array(fit.line_direction)
     err = abs(fit.vanishing_px - _stored_vanishing(d, u))
-    assert fit.frames_used == d["expected"]["frames"] - 1
-    assert err < abs(d["expected"]["err_px"])
+    assert fit.frames_used == d["expected"]["frames"]
+    assert err == pytest.approx(2.1838057001550624, abs=1e-4)
+    assert err < abs(d["expected"]["err_px"]) / 2
 
 
 def test_refuses_when_the_trim_leaves_too_few_frames():
@@ -418,16 +438,16 @@ def test_a_fit_over_two_unlinked_clusters_uses_one():
 
 
 def test_a_frame_whose_only_pairs_fail_the_robust_pass_has_no_size():
-    """Session 114's case: frame 7's two pairs contradict each other (one a
-    wrong-layer match ~e^5 off), so its first solve splits the difference and
-    both fail the robust pass. With no pair left it has no size, not one the
-    gauge made up. (A lone pair could not be judged: with no loop, nothing
-    contradicts it.)"""
+    """Frame 7's two pairs contradict each other (one a wrong-layer match e^2
+    off: inside `MAX_PAIR_LOG_SCALE`, so the robust pass's to catch), so its
+    first solve splits the difference and both fail the robust pass. With no
+    pair left it has no size, not one the gauge made up. (A lone pair could
+    not be judged: with no loop, nothing contradicts it.)"""
     z = np.linspace(1.0, 3.0, 12)
     logs = -np.log(z)
     pairs = [p for p in _exact_pairs(z) if 7 not in (p.i, p.j)]
     pairs.append(sc.PairScale(3, 7, logs[7] - logs[3], 20))
-    pairs.append(sc.PairScale(4, 7, logs[7] - logs[4] + 5.0, 20))
+    pairs.append(sc.PairScale(4, 7, logs[7] - logs[4] + 2.0, 20))
     sizes = sc.solve_log_sizes(12, pairs)
     assert not sizes.connected[7] and np.isnan(sizes.log_sizes[7])
     # The single robust pass (the paper's) also loses frames 3 and 4 here: the
@@ -523,6 +543,65 @@ def test_registration_recovers_the_scale_about_the_dot():
     assert near >= sc.MIN_PAIR_NEAR
 
 
+def _similar_features(scale, half_width, n=400, seed=1):
+    """Matched features around the dot, `b` an exact similarity of `a` about
+    the dot (scale `scale`, rotated 0.1 rad, shifted)."""
+    rng = np.random.default_rng(seed)
+    dot = np.array([1000.0, 800.0])
+    xy_a = dot + rng.uniform(-half_width, half_width, (n, 2))
+    c, s = np.cos(0.1), np.sin(0.1)
+    xy_b = scale * (xy_a - dot) @ np.array([[c, s], [-s, c]]) + dot + (40.0, -25.0)
+    desc = rng.normal(size=(n, 128)).astype(np.float32)
+    return (
+        sc.FrameFeatures(xy=xy_a.astype(np.float32), desc=desc),
+        sc.FrameFeatures(xy=xy_b.astype(np.float32), desc=desc),
+        dot,
+    )
+
+
+@pytest.mark.parametrize("scale", [1 / 2.9, 2.9])
+def test_registration_keeps_the_largest_ratio_a_real_pair_has(scale):
+    """2.9x either way: the largest of cscw's 1873 real golden pairs."""
+    a, b, dot = _similar_features(scale, half_width=400)
+    got = sc.pair_scale(a, b, dot)
+    assert got is not None
+    assert got[0] == pytest.approx(np.log(scale), abs=1e-4)
+
+
+@pytest.mark.parametrize("scale", [1 / 12, 12])
+def test_registration_refuses_a_ratio_beyond_the_bound(scale):
+    """Well measured (both spreads far above RANSAC_PX) but 12x: implausible."""
+    a, b, dot = _similar_features(scale, half_width=400)
+    assert sc.pair_scale(a, b, dot) is None
+
+
+def test_registration_refuses_inliers_inside_the_ransac_tolerance():
+    """A 2x reduction of a 10 px patch puts every `b` inlier within ~4 px RMS
+    of one spot: inside RANSAC_PX, so any smaller scale fits it as well. The
+    ratio is plausible; it is not measured."""
+    a, b, dot = _similar_features(0.5, half_width=10, n=60)
+    assert sc.pair_scale(a, b, dot) is None
+
+
+def test_registration_refuses_a_similarity_that_collapses_the_object():
+    """Matches that all land on one spot in `b` fit a similarity of scale ~0:
+    a 'size ratio' no two frames of a dive have. Under OpenCV 5 cscw's mission
+    63 features produce two such pairs (log scale -41 and -42), which connect
+    two more frames and move the vanishing position 3900 px; their inliers
+    sit 0.001 px apart in `b`, where real pairs' sit 33 px or more."""
+    rng = np.random.default_rng(0)
+    dot = np.array([1000.0, 800.0])
+    xy_a = (dot + rng.uniform(-60, 60, (60, 2))).astype(np.float32)
+    xy_b = (np.array([1500.0, 500.0]) + rng.normal(0, 0.5, (60, 2))).astype(np.float32)
+    desc = rng.normal(size=(60, 128)).astype(np.float32)
+
+    got = sc.pair_scale(
+        sc.FrameFeatures(xy=xy_a, desc=desc), sc.FrameFeatures(xy=xy_b, desc=desc), dot
+    )
+
+    assert got is None
+
+
 def test_registration_needs_features():
     empty = sc.FrameFeatures(xy=np.zeros((0, 2), np.float32), desc=None)
     assert sc.pair_scale(empty, empty, np.array([0.0, 0.0])) is None
@@ -544,11 +623,17 @@ CSCW_FEATURES = _cscw_features()
 
 
 @pytest.mark.skipif(CSCW_FEATURES is None, reason="needs ../cscw-fishsense2027")
-@pytest.mark.parametrize("mission", ["63", "94"])
+@pytest.mark.parametrize("mission", sorted(GOLDEN, key=int))
 def test_registration_reproduces_cscws_pairs_from_its_features(mission):
     """The registration itself, against the golden pairs, when the sibling
-    checkout is present."""
+    checkout is present: cscw's pairs exactly, less session 114's collapsed
+    (7, 23), the one beyond MAX_PAIR_LOG_SCALE. Under OpenCV 4.14 (cscw's)
+    the rest are bit-identical. Under 5 two sessions also gain collapsed
+    pairs that the guard refuses, and the RANSAC refinement moves log scales
+    by up to 7.1e-7 (session 114). Near-zero log scales make that a large
+    relative error, so the tolerance is absolute. Pairs carry ~1 %."""
     d = GOLDEN[mission]
+    want = [p for p in d["pairs"] if abs(p[2]) <= sc.MAX_PAIR_LOG_SCALE]
     features = []
     for image_id in d["image_ids"]:
         z = np.load(CSCW_FEATURES / f"{image_id}.npz", allow_pickle=True)
@@ -556,8 +641,11 @@ def test_registration_reproduces_cscws_pairs_from_its_features(mission):
 
     got = sc.pair_scales(features, np.array(d["dots"]))
 
-    assert [(p.i, p.j, p.near) for p in got] == [(i, j, n) for i, j, _, n in d["pairs"]]
-    assert [p.log_scale for p in got] == pytest.approx([v for _, _, v, _ in d["pairs"]])
+    assert len(d["pairs"]) - len(want) == (1 if mission == "114" else 0)
+    assert [(p.i, p.j, p.near) for p in got] == [(i, j, n) for i, j, _, n in want]
+    assert [p.log_scale for p in got] == pytest.approx(
+        [v for _, _, v, _ in want], rel=0, abs=2e-6
+    )
 
 
 # -- the shadow stage's copy: cscw's size_constancy_sam.py pool, through this module --
@@ -691,11 +779,12 @@ def test_pool_fits_match_the_services_shadow_port(session, variant, tv, se_px):
         ("80", -2075.52982343564, 1.1864945722318934, 31,
          [0.021941865426729087, 0.027812417254195643, 0.9993723149998073],
          [-0.029640994130566624, -0.09968656613080679, 0.0]),
-        # services: tv -2273.5939549207674, se 0.8149804544450181, axis
-        # [0.02113307546381264, 0.03277202789457865, 0.9992394044017269]. Both
-        # drop frame 7; core's sizes are solved with its bad pairs already out.
-        ("114", -2273.7843259011893, 0.8122183526337636, 28,
-         [0.021162177941014645, 0.032831945741439605, 0.9992368215611472],
+        # services: tv -2273.5939549207674, se 0.8149804544450181, 28 frames,
+        # axis [0.02113307546381264, 0.03277202789457865, 0.9992394044017269].
+        # Services drops frame 7; core keeps it, its collapsed pair (7, 23)
+        # out before the solve (MAX_PAIR_LOG_SCALE).
+        ("114", -2273.5578981324384, 0.781313857611461, 29,
+         [0.021125640753004937, 0.03276159880630131, 0.9992399035999463],
          [-0.045454413480002474, -0.09354088034217428, 0.0]),
     ],
 )  # fmt: skip
