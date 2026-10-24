@@ -142,6 +142,14 @@ python/fishsense_core/
     fish/sam3.py              # SAM 3.1 loader (sam3 is caller-installed)
     fish/fish_at_dot.py       # Window at the dot -> segment -> gate -> head/tail
     fish/headtail_keypoints.py  # SimCC snout/fork model on the SAM-box crop
+    line_fit.py               # Per-dive laser line; ransac_line / consensus_line
+    laser_reflection.py       # Laser vs its specular reflection: two parallel lines
+    laser_color.py            # Red or green laser, read off the dot
+    calibration_checks.py     # Outlier trim, then the gates on calibrate_laser's fit
+    size_constancy.py         # Label-free calibration by size constancy
+    checkerboard.py           # Checkerboard corners -> board coordinates
+    plane.py                  # Board plane, its pose, and the laser point on it
+    world_point.py            # Laser point (depth/range/residual/parallax), length
     image/image.py            # Abstract Image base class
     image/decode.py           # DecodeConfig — the decode chain, parameterised
     image/raw_image.py        # Raw camera image decoding
