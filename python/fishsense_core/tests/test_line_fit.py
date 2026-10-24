@@ -19,6 +19,8 @@ from fishsense_core.line_fit import (
     MIN_POINTS_FOR_LINE,
     RANSAC_INLIER_TOL_PX,
     RANSAC_MAX_ITERS,
+    LineConsensus,
+    LineFit,
     consensus_line,
     fit_dive_line,
     fit_line_pca,
@@ -484,5 +486,63 @@ def test_inclusive_decides_a_dot_at_exactly_the_tolerance():
     strict = consensus_line(xy, tol_px=4.0, inclusive=False)
     inclusive = consensus_line(xy, tol_px=4.0)
     assert strict is not None and inclusive is not None
+    # Both masks, both modes: the consensus decides the tie, and the re-score
+    # against the refit must honour `inclusive` too.
+    assert strict.consensus.tolist() == [True, True, True, False]
     assert strict.inliers.tolist() == [True, True, True, False]
     assert inclusive.consensus.tolist() == [True, True, True, True]
+    assert inclusive.inliers.tolist() == [True, True, True, True]
+
+
+
+# -- the review's fixes ------------------------------------------------------
+
+
+@pytest.mark.parametrize("n", [0, 1])
+def test_ransac_line_with_too_few_points_is_none_not_an_error(n):
+    """It used to draw a pair first and raise 'Cannot take a larger sample
+    than population'."""
+    assert ransac_line(np.zeros((n, 2)), tol_px=10, max_iters=500) is None
+    assert consensus_line(np.zeros((n, 2)), tol_px=10) is None
+
+
+def test_rng_none_is_seed_zero_in_ransac_line_as_in_fit_dive_line():
+    rng = np.random.default_rng(4)
+    xy = np.column_stack([np.arange(30.0), np.arange(30.0) * 0.5]) + rng.normal(0, 3, (30, 2))
+    want = ransac_line(xy, tol_px=4, max_iters=200, rng=0)
+    assert ransac_line(xy, tol_px=4, max_iters=200, rng=None) == want
+    assert ransac_line(xy, tol_px=4, max_iters=200, rng=None) == want
+
+
+def test_line_consensus_compares_and_hashes():
+    """The generated __eq__ raised on the arrays, and __hash__ did too."""
+    xy = np.array([[0.0, 0.0], [10.0, 0.0], [20.0, 0.0], [5.0, 30.0]])
+    a, b = consensus_line(xy, tol_px=4.0), consensus_line(xy.copy(), tol_px=4.0)
+    assert a == b and hash(a) == hash(b) and len({a, b}) == 1
+    c = consensus_line(xy, tol_px=4.0, inclusive=False)
+    other = LineConsensus(c.a, c.b, c.c, ~c.inliers, c.consensus)
+    assert other != c
+    assert a != "not a fit"
+
+
+def test_the_new_primitives_are_re_exported_from_laser():
+    """`fishsense_core.laser` re-exports the line fit; the new names too."""
+    from fishsense_core import laser, line_fit  # pylint: disable=import-outside-toplevel
+
+    for name in ("ransac_line", "consensus_line", "LineConsensus", "fit_line_tls", "fit_line_pca"):
+        assert getattr(laser, name) is getattr(line_fit, name)
+        assert name in laser.__all__
+
+
+def test_one_distance_expression_for_linefit_and_ransac():
+    """LineFit.perpendicular_distance and ransac_line share the expression
+    their pinned results depend on."""
+    from fishsense_core import line_fit  # pylint: disable=import-outside-toplevel
+
+    rng = np.random.default_rng(2)
+    xy = rng.uniform(0, 4000, (50, 2))
+    fit = LineFit(0.6, 0.8, -1234.5, 50, 50, 1.0, 0.0, 0.0, 1.0)
+    np.testing.assert_array_equal(
+        fit.perpendicular_distance(xy[:, 0], xy[:, 1]),
+        line_fit._elementwise_distance(xy, (0.6, 0.8, -1234.5)),  # pylint: disable=protected-access
+    )
