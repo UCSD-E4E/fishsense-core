@@ -79,14 +79,20 @@ What the services port changed from cscw, all kept here:
   frame before the trim and was never recomputed, so the frame the trim
   dropped still tilted it; now it is refitted from the kept frames and the
   trim repeated until the kept set stops changing.
-* **A collapsed similarity is no layer** (`MAX_PAIR_LOG_SCALE`). Matches that
-  all land on one spot in the other frame fit a similarity of scale ~0, and
-  it was the object's if it held the dot. OpenCV 5's RANSAC finds two on
-  cscw's own mission 63 features (log scale -41 and -42; 4.14, which made
-  cscw's pairs, did not), and they connect two frames that have no real
-  pair, moving the vanishing position from -2101 to -5988 px. cscw's session
-  114 pair at -37.18 is the same thing. Now such a layer is peeled off and
-  skipped like a reflected one.
+* **A collapsed similarity is no layer.** Matches that all land on one spot
+  in the other frame fit a similarity of scale ~0, and it was the object's
+  if it held the dot. cscw's own pairs hold one (session 114's (7, 23), log
+  scale -37.18, its inliers 0 px apart), and under OpenCV 5 the same
+  features give six (sessions 63, 71, 114; -39 to -42), mission 63's two
+  connecting frames with no real pair and moving its vanishing position
+  from -2101 to -5988 px. `pair_scale` now skips a layer whose inliers sit
+  within `RANSAC_PX` RMS of one spot in either frame (these sit at <= 0.001
+  px; real pairs' at >= 33) or whose ratio is beyond `MAX_PAIR_LOG_SCALE`
+  (10x; real pairs reach 2.9x), and `solve_log_sizes` drops a pair beyond
+  that bound before its first solve, whoever measured it. On the ten
+  sessions' features this is cscw's registration exactly, under 4.14 or 5,
+  less that one pair; session 114 then keeps frame 7, whose 16 other pairs
+  are good, and lands 2.2 px from the known-size fit (cscw's 6.4).
 
 **The shadow copy.** fishsense-services v0.48.0 also carries
 `shadow_calibration/fit.py`, a port of cscw-fishsense2027@8312780a
@@ -156,8 +162,9 @@ MIN_PAIR_NEAR = 3
 #: RANSAC reprojection threshold, px (register: 6.0).
 RANSAC_PX = 6.0
 #: The largest |log size ratio| a pair may have: 10x, a frame ten times the
-#: other's range. cscw's 1874 golden pairs reach 1.07 (2.9x); a collapsed
-#: similarity reads 6 to 42.
+#: other's range. A plausibility bound, applied to every pair the solve takes
+#: (`solve_log_sizes`), wherever it came from. Of cscw's 1874 golden pairs,
+#: 1873 reach 1.07 (2.9x); the other is session 114's collapsed one, -37.18.
 MAX_PAIR_LOG_SCALE = float(np.log(10.0))
 #: Lowe's ratio (register: 0.75).
 LOWE_RATIO = 0.75
@@ -269,7 +276,10 @@ def pair_scale(  # pylint: disable=too-many-locals
     Sequential RANSAC peels off up to three similarity motions; the object's
     is the one whose inlier hull contains the dot, with the most inliers within
     `NEAR_PX` of it. Its local scale at the dot, ``sqrt|det J|``, is the size
-    ratio."""
+    ratio. A layer is no candidate when that scale is not measured: a
+    reflection (``det J <= 0``), inliers within `RANSAC_PX` RMS of one spot in
+    either frame (a collapse, which fits any small enough scale), or a ratio
+    beyond `MAX_PAIR_LOG_SCALE`."""
     # cv2's members are built at import time; pylint cannot see them.
     # pylint: disable=no-member
     import cv2  # pylint: disable=import-outside-toplevel
@@ -303,13 +313,24 @@ def pair_scale(  # pylint: disable=too-many-locals
         det = np.linalg.det(m[:, :2])
         near = int((np.hypot(*(pa[inl] - (x, y)).T) < NEAR_PX).sum())
         log_scale = float(0.5 * np.log(det)) if det > 0 else np.nan
-        # NaN fails the comparison, so this also skips a reflection.
-        if abs(log_scale) <= MAX_PAIR_LOG_SCALE and inside > 0 and (
-            best is None or near > best[1]  # pylint: disable=unsubscriptable-object
+        # Inliers that sit inside the RANSAC tolerance in either frame fit
+        # every scale small enough to keep them there: it is not measured.
+        spread = min(_rms_radius(pa[inl]), _rms_radius(pb[inl]))
+        if (
+            np.isfinite(log_scale)
+            and spread >= RANSAC_PX
+            and abs(log_scale) <= MAX_PAIR_LOG_SCALE
+            and inside > 0
+            and (best is None or near > best[1])  # pylint: disable=unsubscriptable-object
         ):
             best = (log_scale, near)
         pa, pb = pa[~inl], pb[~inl]
     return best
+
+
+def _rms_radius(xy: np.ndarray) -> float:
+    """RMS distance of points from their centroid, px."""
+    return float(np.sqrt(((xy - xy.mean(axis=0)) ** 2).sum(axis=1).mean()))
 
 
 def pair_scales(features: Sequence[FrameFeatures], dots: np.ndarray) -> list[PairScale]:
@@ -396,11 +417,18 @@ def solve_log_sizes(n: int, pairs: Sequence[PairScale]) -> LogSizes:
     than one the gauge made up. With every frame in one component this is
     the services port's solve exactly.
 
+    A pair beyond `MAX_PAIR_LOG_SCALE` is dropped before the first solve, not
+    left to the robust pass: one at -37 (session 114's) drags that solve far
+    enough to fail every other pair through its frames, so a frame with good
+    pairs loses its size. The bound is here, not only in `pair_scale`, for
+    pairs that come from elsewhere (cscw's files, services' shadow track).
+
     Raises:
         ValueError: A pair with ``near`` < 1, a non-finite ``log_scale``, or
             indices that are not two distinct frames in ``range(n)``.
     """
     _check_pairs(n, pairs)
+    pairs = [p for p in pairs if abs(p.log_scale) <= MAX_PAIR_LOG_SCALE]
     if not pairs:
         return LogSizes(np.full(n, np.nan), np.zeros(n, bool), float("nan"))
     a, b, w = _weighted_solve(n, pairs, np.ones(n, bool))
