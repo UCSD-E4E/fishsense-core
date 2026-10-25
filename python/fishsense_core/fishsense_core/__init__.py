@@ -3,6 +3,7 @@
 import ctypes
 import os
 import sys
+from fnmatch import fnmatch
 from glob import glob
 
 from fishsense_core.camera_intrinsics import CameraIntrinsics
@@ -52,25 +53,44 @@ def _preload_nvidia_libs() -> None:
     except Exception:  # pylint: disable=broad-except
         return
 
+    for lib in _runtime_libs_in_order(roots):
+        try:
+            ctypes.CDLL(lib, mode=ctypes.RTLD_GLOBAL)
+        except OSError:
+            pass
+
+
+def _runtime_libs_in_order(roots) -> list:
+    """Every `_CUDA_RUNTIME_LIBS` library under ``roots``, in the list's
+    order (root order, then by name, within a pattern), each once: the first
+    pattern a file matches places it. One directory scan per root."""
+    found = []
+    for root in roots:
+        try:
+            found.extend(sorted(glob(os.path.join(root, "*", "lib", "*.so*"))))
+        except OSError:
+            continue
+    ordered, placed = [], set()
     for pattern in _CUDA_RUNTIME_LIBS:
-        for root in roots:
-            try:
-                libs = sorted(glob(os.path.join(root, "*", "lib", pattern)))
-            except OSError:
-                continue
-            for lib in libs:
-                try:
-                    ctypes.CDLL(lib, mode=ctypes.RTLD_GLOBAL)
-                except OSError:
-                    pass
+        for lib in found:
+            if lib not in placed and fnmatch(os.path.basename(lib), pattern):
+                ordered.append(lib)
+                placed.add(lib)
+    return ordered
 
 
 #: What ORT's CUDA provider loads, dependencies first: cuBLAS needs cuBLASLt
 #: (else it resolves one by RUNPATH, maybe a mismatched system copy, as
-#: torch's list notes), cuSPARSE nvJitLink, cuSOLVER both. cuDNN 9 dlopens
+#: torch's list notes), cuSPARSE nvJitLink, cuSOLVER both. onnxruntime-gpu
+#: 1.24.4's ``libonnxruntime_providers_cuda.so`` is DT_NEEDED on cudart,
+#: cublasLt, cublas, curand, cufft and cudnn alone, all here; re-check its
+#: ``readelf -d`` when the onnxruntime-gpu pin moves, since a library missing
+#: from this list is not preloaded and its failure is silent. cuDNN 9 dlopens
 #: its sub-libraries itself, from its own $ORIGIN; they are listed anyway so
-#: it loads as it always has. Covers the cu12 layout (one package per
-#: library) and cu13's (all under ``nvidia/cu13/lib``).
+#: it loads as it always has, graph first (every sub-library needs it) and
+#: ops next (adv and cnn need it; nvidia-cudnn-cu12 9.27). Covers the cu12
+#: layout (one package per library) and cu13's (all under
+#: ``nvidia/cu13/lib``).
 _CUDA_RUNTIME_LIBS = (
     "libcudart.so*",
     "libnvJitLink.so*",
@@ -82,6 +102,8 @@ _CUDA_RUNTIME_LIBS = (
     "libcurand.so*",
     "libnvrtc.so*",
     "libnvrtc-builtins.so*",
+    "libcudnn_graph.so*",
+    "libcudnn_ops.so*",
     "libcudnn*.so*",
 )
 
