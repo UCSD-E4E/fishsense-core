@@ -86,10 +86,12 @@ What the services port changed from cscw, all kept here:
   features give six (sessions 63, 71, 114; -39 to -42), mission 63's two
   connecting frames with no real pair and moving its vanishing position
   from -2101 to -5988 px. `pair_scale` now skips a layer whose inliers sit
-  within `RANSAC_PX` RMS of one spot in either frame (these sit at <= 0.001
-  px; real pairs' at >= 33) or whose ratio is beyond `MAX_PAIR_LOG_SCALE`
-  (10x; real pairs reach 2.9x), and `solve_log_sizes` drops a pair beyond
-  that bound before its first solve, whoever measured it. On the ten
+  within `RANSAC_PX` RMS of one spot in the second frame (these sit at <=
+  0.001 px; real pairs' at >= 33) or whose ratio is beyond
+  `MAX_PAIR_LOG_SCALE` (10x; real pairs reach 2.9x), and `solve_log_sizes`
+  drops a pair beyond that bound before its first solve, whoever measured
+  it. The pairs it drops are counted (``implausible_pairs``), not counted
+  as matched, and left out of the residual SD. On the ten
   sessions' features this is cscw's registration exactly, under 4.14 or 5,
   less that one pair; session 114 then keeps frame 7, whose 16 other pairs
   are good, and lands 2.2 px from the known-size fit (cscw's 6.4).
@@ -166,6 +168,13 @@ RANSAC_PX = 6.0
 #: (`solve_log_sizes`), wherever it came from. Of cscw's 1874 golden pairs,
 #: 1873 reach 1.07 (2.9x); the other is session 114's collapsed one, -37.18.
 MAX_PAIR_LOG_SCALE = float(np.log(10.0))
+
+
+def _plausible(log_scale: float) -> bool:
+    """Within `MAX_PAIR_LOG_SCALE`: the one test both `pair_scale` and
+    `solve_log_sizes` apply."""
+    return abs(log_scale) <= MAX_PAIR_LOG_SCALE
+
 #: Lowe's ratio (register: 0.75).
 LOWE_RATIO = 0.75
 #: SIFT features per frame (register: 4000).
@@ -214,8 +223,11 @@ class LogSizes:
     log_sizes: np.ndarray
     #: Frames some pair touches; the rest have no size.
     connected: np.ndarray
-    #: SD of every pair's residual after the solve (register's pair_resid_sd).
+    #: SD of the residuals of the plausible pairs between sized frames, after
+    #: the solve (register's pair_resid_sd, less the implausible pairs).
     residual_sd: float
+    #: Pairs beyond `MAX_PAIR_LOG_SCALE`, dropped before the solve.
+    implausible_pairs: int = 0
 
 
 # A result record: every field is reported, so the count is the payload's.
@@ -233,7 +245,9 @@ class LabelFreeFit:  # pylint: disable=too-many-instance-attributes
     #: Indices (into the frames given) the fit used.
     used: list[int]
     frames_used: int
+    #: Matched pairs the solve took: those given, less `implausible_pairs`.
     pairs: int
+    implausible_pairs: int
     size_ratio: Optional[float]
     se_px: Optional[float]
     pair_residual_sd: Optional[float]
@@ -278,8 +292,8 @@ def pair_scale(  # pylint: disable=too-many-locals
     `NEAR_PX` of it. Its local scale at the dot, ``sqrt|det J|``, is the size
     ratio. A layer is no candidate when that scale is not measured: a
     reflection (``det J <= 0``), inliers within `RANSAC_PX` RMS of one spot in
-    either frame (a collapse, which fits any small enough scale), or a ratio
-    beyond `MAX_PAIR_LOG_SCALE`."""
+    `b` (a collapse, which fits any small enough scale), or a ratio beyond
+    `MAX_PAIR_LOG_SCALE`."""
     # cv2's members are built at import time; pylint cannot see them.
     # pylint: disable=no-member
     import cv2  # pylint: disable=import-outside-toplevel
@@ -313,13 +327,15 @@ def pair_scale(  # pylint: disable=too-many-locals
         det = np.linalg.det(m[:, :2])
         near = int((np.hypot(*(pa[inl] - (x, y)).T) < NEAR_PX).sum())
         log_scale = float(0.5 * np.log(det)) if det > 0 else np.nan
-        # Inliers that sit inside the RANSAC tolerance in either frame fit
-        # every scale small enough to keep them there: it is not measured.
-        spread = min(_rms_radius(pa[inl]), _rms_radius(pb[inl]))
+        # RANSAC's tolerance is in `b`: a scale off by a fraction e moves the
+        # inliers there by about e times their spread, so inliers within
+        # RANSAC_PX RMS of one spot fit every smaller scale (0 included) as
+        # well: it is not measured. A tight `a` alone is not a collapse; it
+        # is magnified in `b`, or the ratio fails the bound.
+        measured = np.isfinite(log_scale) and _rms_radius(pb[inl]) >= RANSAC_PX
         if (
-            np.isfinite(log_scale)
-            and spread >= RANSAC_PX
-            and abs(log_scale) <= MAX_PAIR_LOG_SCALE
+            measured
+            and _plausible(log_scale)
             and inside > 0
             and (best is None or near > best[1])  # pylint: disable=unsubscriptable-object
         ):
@@ -428,9 +444,10 @@ def solve_log_sizes(n: int, pairs: Sequence[PairScale]) -> LogSizes:
             indices that are not two distinct frames in ``range(n)``.
     """
     _check_pairs(n, pairs)
-    pairs = [p for p in pairs if abs(p.log_scale) <= MAX_PAIR_LOG_SCALE]
+    implausible = sum(not _plausible(p.log_scale) for p in pairs)
+    pairs = [p for p in pairs if _plausible(p.log_scale)]
     if not pairs:
-        return LogSizes(np.full(n, np.nan), np.zeros(n, bool), float("nan"))
+        return LogSizes(np.full(n, np.nan), np.zeros(n, bool), float("nan"), implausible)
     a, b, w = _weighted_solve(n, pairs, np.ones(n, bool))
     logs = np.linalg.lstsq(a, b, rcond=None)[0]
     r = (a[:-1] @ logs - b[:-1]) / w
@@ -441,12 +458,15 @@ def solve_log_sizes(n: int, pairs: Sequence[PairScale]) -> LogSizes:
     a, b, w = _weighted_solve(n, own, connected)
     logs = np.linalg.lstsq(a, b, rcond=None)[0]
     logs[~connected] = np.nan
-    # Residual SD over every pair whose frames both have sizes, as before.
+    # Residual SD over every plausible pair whose frames both have sizes:
+    # the robust pass's drops included, the implausible pairs not.
     sized = [k for k, p in enumerate(pairs) if connected[p.i] and connected[p.j]]
     resid = np.array(
         [(logs[pairs[k].j] - logs[pairs[k].i]) - pairs[k].log_scale for k in sized]
     )
-    return LogSizes(logs, connected, float(resid.std()) if len(resid) else float("nan"))
+    return LogSizes(
+        logs, connected, float(resid.std()) if len(resid) else float("nan"), implausible
+    )
 
 
 def line_direction(line: Optional[Sequence[float]], dots: np.ndarray) -> np.ndarray:
@@ -583,7 +603,8 @@ def _refused(reason: str, o_mag_m: float, **seen) -> LabelFreeFit:
     fields = {
         "laser_position": None, "laser_axis": None, "vanishing_px": None,
         "line_direction": None, "line_offset_px": None, "used": [],
-        "frames_used": 0, "pairs": 0, "size_ratio": None, "se_px": None,
+        "frames_used": 0, "pairs": 0, "implausible_pairs": 0,
+        "size_ratio": None, "se_px": None,
         "pair_residual_sd": None, "o_mag_m": o_mag_m,
     }  # fmt: skip
     fields.update(seen)
@@ -607,17 +628,29 @@ def fit_label_free(
     the dot on it: their dots (rectified px) and the pairwise size ratios.
 
     Refused (no beam) with too few matched pairs (fewer than frames, as
-    register.score skips), too few connected frames, too little size spread,
-    or an optimum at the search bracket's edge."""
+    register.score skips; a pair beyond `MAX_PAIR_LOG_SCALE` is no match),
+    too few connected frames, too little size spread, or an optimum at the
+    search bracket's edge.
+
+    Raises:
+        ValueError: A malformed pair (`solve_log_sizes`'s), checked before
+            the pairs are counted.
+    """
     dots = np.asarray(dots, float).reshape(-1, 2)
-    if len(pairs) < len(dots) or not pairs:
-        return _refused("too_few_matched_pairs", o_mag_m, pairs=len(pairs))
+    _check_pairs(len(dots), pairs)
+    matched = sum(_plausible(p.log_scale) for p in pairs)
+    if matched < len(dots) or not matched:
+        return _refused(
+            "too_few_matched_pairs", o_mag_m,
+            pairs=matched, implausible_pairs=len(pairs) - matched,
+        )  # fmt: skip
     sizes = solve_log_sizes(len(dots), pairs)
     used = np.flatnonzero(sizes.connected)
     seen = {
         "used": [int(i) for i in used],
         "frames_used": len(used),
-        "pairs": len(pairs),
+        "pairs": matched,
+        "implausible_pairs": sizes.implausible_pairs,
         "pair_residual_sd": sizes.residual_sd,
     }
     if len(used) < min_frames:
