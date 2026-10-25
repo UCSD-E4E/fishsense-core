@@ -134,8 +134,18 @@ MIN_GRID_SIDE = 3
 #: sizes) under OpenCV 5.0: the worst genuine corner sits at 0.05-1.5 % of the
 #: spacing (an occluder's edge corner is the 1.5 %), against 5 % here. An
 #: incoherent detection (corners that are not one lattice) lands far above.
-#: Re-measure on real underwater frames before tightening it; the safe
-#: direction is to drop frames (there are 28-133 per calibration dive).
+#:
+#: **Measured on real frames** (fishsense-services, 2026-10-25: all 745
+#: production checkerboard renders, 17 missions, the E4E 10 x 14 board; the
+#: 640 accepted, repaired corners excluded), as fractions of the spacing:
+#: worst corner p50 0.015, p95 0.032, p99 0.040, max 0.049; second-worst max
+#: 0.037. So real genuine corners reach right up to this bound, and a genuine
+#: corner just past it is repaired rather than refusing the board (see
+#: `MAX_REPAIRED_CORNERS`), which is why the bound is safe this tight. Do not
+#: tighten it: it would turn genuine boards into repairs, and past the repair
+#: cap into refusals. Those were rectified JPEG renders; production detects on
+#: a fresh rectification of the raw frame, which may score slightly
+#: differently.
 #:
 #: It **cannot** see a uniform scale error: corners two squares apart labelled
 #: one apart are still a perfect grid. :data:`MIN_CHECKER_PARITY` catches that.
