@@ -985,3 +985,156 @@ def test_a_non_8_bit_image_is_a_clear_error(dtype):
 def test_an_unknown_shape_is_a_clear_error():
     with pytest.raises(ValueError, match="grey, BGR or BGRA"):
         _detect(np.zeros((40, 40, 2), np.uint8))
+
+
+# ---------- regressions from 4.3.0 on real frames ----------
+#
+# fishsense-services ran 4.3.0 over all 745 production checkerboard frames
+# (2026-10-24, 17 missions, the E4E 10 x 14 board). Two ways it dropped good
+# boards:
+#  * 11 full boards refused for ONE corner a laser dot had dragged 9-11 px,
+#    0.18-0.20 of the spacing, every other corner under 1 px (e.g. mission
+#    509 capture 133042: worst 0.201, second-worst 0.018);
+#  * 18 boards refused because seed 0 drew a partial grid while another
+#    seed found the whole board.
+# The tests below put those two shapes through the public API.
+
+
+def _real_corners(img):
+    """The detector's own corners and grid on a rendered board."""
+    cv2.setRNGSeed(0)
+    found, corners, meta = cv2.findChessboardCornersSBWithMeta(
+        img, sut._REQUESTED_PATTERN, sut._DETECTION_FLAGS  # pylint: disable=protected-access
+    )
+    assert found
+    return np.asarray(corners, np.float64).reshape(-1, 2), meta.shape[:2]
+
+
+def _detector_returning(monkeypatch, by_seed):
+    """Make OpenCV's detector answer per seed: by_seed(seed) -> (corners, shape) or None."""
+    state = {"seed": None}
+    real_seed = cv2.setRNGSeed
+
+    def set_seed(seed):
+        state["seed"] = seed
+        real_seed(seed)
+
+    def find(_gray, _pattern, _flags):
+        answer = by_seed(state["seed"])
+        if answer is None:
+            return False, None, None
+        corners, shape = answer
+        return True, corners.reshape(-1, 1, 2).astype(np.float32), np.zeros(shape)
+
+    monkeypatch.setattr(sut.cv2, "setRNGSeed", set_seed)
+    monkeypatch.setattr(sut.cv2, "findChessboardCornersSBWithMeta", find)
+
+
+def test_a_board_with_one_corner_dragged_by_the_dot_is_kept(monkeypatch):
+    """4.3.0 refused it on the worst corner. The dragged corner is dropped
+    from the correspondences, so it never reaches solvePnP, and the board is
+    kept."""
+    img = _render()
+    corners, shape = _real_corners(img)
+    spacing = sut.median_corner_spacing(corners, *shape)
+    dragged = corners.copy()
+    dragged[37] += [0.2 * spacing, 0.0]  # mission 509's 0.201
+    _detector_returning(monkeypatch, lambda seed: (dragged, shape))
+
+    detected = _detect(img)
+
+    assert detected is not None
+    assert detected.dropped == (37,)
+    assert len(detected.image_points) == shape[0] * shape[1] - 1
+    np.testing.assert_allclose(detected.grid_image_points, dragged.astype(np.float32))
+
+
+def test_a_board_seed_zero_misses_is_found_by_the_next_seed(monkeypatch):
+    """4.3.0 tried seed 0 only, and on 18 production frames that draw was a
+    partial grid the gates refuse while another seed found the whole board."""
+    img = _render()
+    corners, shape = _real_corners(img)
+    _detector_returning(monkeypatch, lambda seed: None if seed == 0 else (corners, shape))
+
+    detected = _detect(img)
+
+    assert detected is not None and (detected.rows, detected.cols) == shape
+
+
+def test_a_board_with_a_corner_a_square_off_is_still_refused(monkeypatch):
+    """Tolerating a dragged corner must not tolerate a lattice error."""
+    img = _render()
+    corners, shape = _real_corners(img)
+    spacing = sut.median_corner_spacing(corners, *shape)
+    wrong = corners.copy()
+    wrong[37] += [spacing, 0.0]
+    _detector_returning(monkeypatch, lambda seed: (wrong, shape))
+    assert _detect(img) is None
+
+
+def test_three_displaced_corners_are_still_refused(monkeypatch):
+    img = _render()
+    corners, shape = _real_corners(img)
+    spacing = sut.median_corner_spacing(corners, *shape)
+    off = corners.copy()
+    off[[10, 50, 100]] += [0.2 * spacing, 0.0]
+    _detector_returning(monkeypatch, lambda seed: (off, shape))
+    assert _detect(img) is None
+
+
+def test_a_twice_the_pitch_lattice_is_still_refused_on_every_seed(monkeypatch):
+    """Mission 522 capture 134474's shape: every other column. Trying more
+    seeds must not let it through."""
+    img = _render()
+    corners, (rows, cols) = _real_corners(img)
+    every_other = corners.reshape(rows, cols, 2)[:, ::2].reshape(-1, 2)
+    _detector_returning(monkeypatch, lambda seed: (every_other, (rows, (cols + 1) // 2)))
+    assert _detect(img) is None
+
+
+def test_seeds_are_tried_in_order_and_the_first_passing_one_wins(monkeypatch):
+    img = _render()
+    corners, shape = _real_corners(img)
+    tried = []
+
+    def by_seed(seed):
+        tried.append(seed)
+        return None if seed < 3 else (corners, shape)
+
+    _detector_returning(monkeypatch, by_seed)
+    assert _detect(img) is not None
+    assert tried == [0, 1, 2, 3]
+
+
+def test_a_frame_that_passes_on_seed_zero_gets_exactly_seed_zeros_grid():
+    """Every frame 4.3.0 accepted keeps its grid: seed 0 is tried first."""
+    img = _occluded(4)
+    np.testing.assert_array_equal(
+        _detect(img).grid_image_points, _detect(img, seed=0).grid_image_points
+    )
+
+
+def test_seed_still_pins_a_single_attempt(monkeypatch):
+    img = _render()
+    tried = []
+    _detector_returning(monkeypatch, lambda seed: tried.append(seed))
+    assert _detect(img, seed=5) is None
+    assert tried == [5]
+
+
+def test_a_clean_board_drops_nothing():
+    detected = _detect(_render())
+    assert detected.dropped == ()
+    np.testing.assert_array_equal(detected.grid_image_points, detected.image_points)
+
+
+def test_the_outline_uses_the_full_grid_even_when_a_corner_was_dropped():
+    col, row = np.meshgrid(np.arange(14), np.arange(10))
+    grid = np.stack([col.ravel(), row.ravel()], axis=1).astype(np.float64) * 40.0 + 200.0
+    keep = np.ones(len(grid), bool)
+    keep[0] = False  # the outline's own corner
+    dropped = sut.DetectedCheckerboard(
+        rows=10, cols=14, body_points=grid[keep], image_points=grid[keep],
+        grid_image_points=grid, dropped=(0,),
+    )  # fmt: skip
+    assert sut.board_hull(dropped)[0] == [200.0, 200.0]

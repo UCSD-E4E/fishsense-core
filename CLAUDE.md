@@ -88,10 +88,12 @@ python/fishsense_core/
                                    #   used; the shadow stage's evaluation metrics
                                    #   (angle errors vs a reference) stay in services
     checkerboard.py                # Checkerboard corners paired with board coordinates,
-                                   #   feeding plane.plane_from_correspondences. Seeds
-                                   #   OpenCV's per-thread RNG (seed=0) before detecting,
-                                   #   so occluded boards detect the same way every call;
-                                   #   a checker-parity gate refuses 2x-pitch lattices
+                                   #   feeding plane.plane_from_correspondences. Tries
+                                   #   seeds 0..7 of OpenCV's per-thread RNG in order,
+                                   #   first passing detection wins (deterministic); drops
+                                   #   up to 2 corners a laser dot dragged (the pose never
+                                   #   sees them); a checker-parity gate refuses 2x-pitch
+                                   #   lattices
     plane.py                       # Board plane: pose_from_correspondences (the one
                                    #   solvePnP, on RECTIFIED points), plane_from_pose,
                                    #   plane_from_correspondences, plane_difference,

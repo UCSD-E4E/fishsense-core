@@ -20,7 +20,12 @@ OpenCV's random generator, so the same frame could come back as a different
 sub-grid on each call (measured: a 4-square occluder gave 4 x 10, 5 x 3 and
 3 x 3 over 20 calls), and with it different correspondences, planes and a
 different laser fit. :func:`detect_checkerboard` therefore seeds that
-generator (``seed``, default 0) immediately before detecting. OpenCV's
+generator before each attempt, and tries the seeds in :data:`DEFAULT_SEEDS`
+in order, returning the first detection that passes every gate. One fixed
+seed was not enough: on real frames seed 0 sometimes draws a small partial
+grid that the gates refuse while another seed finds the whole board (18 of
+745 production frames, fishsense-services' survey of 2026-10-24). A frame
+that passes on seed 0 gets exactly the grid it got from one seed. OpenCV's
 generator is per thread, so this resets the calling thread's only.
 
 **The detector is asked for a small grid, and told the real one.**
@@ -73,6 +78,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Sequence
 
 import cv2
 import numpy as np
@@ -81,7 +87,10 @@ import numpy as np
 # pylint: disable=no-member
 
 __all__ = [
+    "DEFAULT_SEEDS",
     "DetectedCheckerboard",
+    "MAX_DROPPED_CORNERS",
+    "MAX_DROPPED_CORNER_FRACTION",
     "MAX_GRID_RESIDUAL_FRACTION",
     "MIN_CHECKER_PARITY",
     "MIN_GRID_SIDE",
@@ -159,20 +168,59 @@ _REQUESTED_PATTERN = (MIN_GRID_SIDE, MIN_GRID_SIDE)
 _DETECTION_FLAGS = cv2.CALIB_CB_EXHAUSTIVE | cv2.CALIB_CB_ACCURACY | cv2.CALIB_CB_LARGER
 
 
+#: The most detected corners that may be dropped as displaced, and refitted
+#: around, before the detection is refused.
+#:
+#: A laser dot on the board pulls the sub-pixel refinement of the corner
+#: under it: on real frames one corner lands 9-11 px (0.18-0.20 of the
+#: spacing) off a grid whose every other corner is under 1 px. Those are
+#: exactly the frames calibration needs, the dot on the board, so refusing
+#: them on the worst corner (as 4.3.0 did, 11 of 745 production frames) was
+#: biased against them. A corner beyond `MAX_GRID_RESIDUAL_FRACTION` is
+#: therefore dropped from the correspondences and the grid refitted, up to
+#: this many; more than this many off is not "a corner under the dot", it is
+#: a grid that is not one lattice, and is refused.
+MAX_DROPPED_CORNERS = 2
+
+#: A dropped corner may sit at most this fraction of the spacing off the
+#: refitted grid. A dot drags a corner by a fraction of a square; a corner
+#: half a square or more off is a different corner, a lattice error, and the
+#: detection is refused rather than repaired.
+MAX_DROPPED_CORNER_FRACTION = 0.5
+
+#: The seeds tried, in order; the first detection that passes every gate is
+#: returned. Deterministic: the same frame gives the same answer.
+DEFAULT_SEEDS = tuple(range(8))
+
+
 @dataclass(frozen=True)
 class DetectedCheckerboard:
     """A detected grid and its correspondences, index-aligned.
 
     `body_points` are board coordinates in **metres**, `image_points` the
-    rectified pixels they landed on, both `(rows * cols, 2)` in the detector's
-    own row-major order. Ordering is the contract `solvePnP` depends on: it
-    pairs them purely by position.
+    rectified pixels they landed on, both in the detector's own row-major
+    order. Ordering is the contract `solvePnP` depends on: it pairs them
+    purely by position. They hold the corners **kept**: `rows * cols` of them
+    unless a displaced corner was dropped (`dropped`, at most
+    `MAX_DROPPED_CORNERS` indices into the full grid), so pass them to
+    `solvePnP` as they are and the dropped corner never reaches the pose.
+
+    `grid_image_points` is the full detected grid, `(rows * cols, 2)`, every
+    corner including any dropped: use it for the board's outline
+    (`board_hull`) and for `median_corner_spacing`, which need the lattice
+    shape, never for the pose.
     """
 
     rows: int
     cols: int
     body_points: np.ndarray
     image_points: np.ndarray
+    grid_image_points: np.ndarray | None = None
+    dropped: tuple[int, ...] = ()
+
+    def __post_init__(self):
+        if self.grid_image_points is None:
+            object.__setattr__(self, "grid_image_points", self.image_points)
 
 
 def grid_residual_px(body_points: np.ndarray, image_points: np.ndarray) -> float:
@@ -272,7 +320,7 @@ def board_hull(detected: DetectedCheckerboard) -> list[list[float]]:
     the cheap thing: 28-133 per calibration dive against `MIN_LASER_POINTS`
     of 2.
     """
-    grid = detected.image_points.reshape(detected.rows, detected.cols, 2)
+    grid = detected.grid_image_points.reshape(detected.rows, detected.cols, 2)
     return [
         [float(x), float(y)]
         for x, y in (grid[0, 0], grid[0, -1], grid[-1, -1], grid[-1, 0])
@@ -342,42 +390,63 @@ def pitch_per_detected_axis(  # pylint: disable=too-many-arguments
     return None
 
 
-# Keyword-only board description plus the seed; one return per refusal, each
-# a distinct reason a frame is dropped.
+def _drop_displaced_corners(
+    body_points: np.ndarray, image_points: np.ndarray, spacing: float
+) -> np.ndarray | None:
+    """Which corners to keep, or None when the grid is not one lattice.
+
+    While a kept corner sits beyond `MAX_GRID_RESIDUAL_FRACTION` of the
+    spacing off the kept corners' best homography, drop the worst and refit,
+    at most `MAX_DROPPED_CORNERS` times. Refused (None) when more are off, or
+    when a dropped corner sits `MAX_DROPPED_CORNER_FRACTION` of the spacing
+    or more off the final grid (a lattice error, not a dragged corner).
+    Least squares throughout, deliberately not RANSAC: a robust fit would
+    absorb the very corners that reveal the grid is wrong.
+    """
+    keep = np.ones(len(body_points), dtype=bool)
+    limit = MAX_GRID_RESIDUAL_FRACTION * spacing
+    for _ in range(MAX_DROPPED_CORNERS + 1):
+        residuals = _homography_residuals(body_points, image_points, keep)
+        if residuals is None:
+            return None
+        worst = int(np.argmax(np.where(keep, residuals, -np.inf)))
+        if residuals[worst] <= limit:
+            if np.any(residuals[~keep] >= MAX_DROPPED_CORNER_FRACTION * spacing):
+                return None
+            return keep
+        if (~keep).sum() == MAX_DROPPED_CORNERS:
+            return None
+        keep[worst] = False
+    return None
+
+
+def _homography_residuals(
+    body_points: np.ndarray, image_points: np.ndarray, keep: np.ndarray
+) -> np.ndarray | None:
+    """Every corner's distance from the homography fitted to the kept ones."""
+    matrix, _ = cv2.findHomography(body_points[keep], image_points[keep], method=0)
+    if matrix is None:
+        return None
+    projected = (matrix @ np.hstack([body_points, np.ones((len(body_points), 1))]).T).T
+    scale = projected[:, 2:3]
+    if not np.all(np.isfinite(scale)) or np.any(scale == 0):
+        return None
+    return np.linalg.norm(projected[:, :2] / scale - image_points, axis=1)
+
+
+# The board description plus the seed; one return per refusal, each a
+# distinct reason a frame is dropped.
 # pylint: disable-next=too-many-locals,too-many-arguments,too-many-return-statements
-def detect_checkerboard(
-    image: np.ndarray,
+def _detect_once(
+    gray: np.ndarray,
+    seed: int,
     *,
     max_rows: int,
     max_cols: int,
     pitch_x_m: float,
     pitch_y_m: float,
-    seed: int = 0,
 ) -> DetectedCheckerboard | None:
-    """Detect the board in `image` and pair its corners with board coordinates.
-
-    `image` must be the **rectified** frame, full resolution, uint8, grey,
-    BGR or BGRA. `max_rows` / `max_cols` are the declared board's interior
-    corners and act as an upper bound, not a target. `pitch_x_m` /
-    `pitch_y_m` are the measured grid pitch along a declared row and down a
-    declared column. `seed` seeds OpenCV's random generator for the call (see
-    the module docstring's note on determinism): the same frame and seed give
-    the same detection every time.
-
-    Returns None when no usable board is found — no detection, a degenerate
-    strip, a grid larger than the declared board, metadata that disagrees
-    with the corners returned, a grid whose axes cannot be told apart on a
-    board whose pitches differ, corners that are not one lattice, or a
-    lattice at the wrong pitch. Every one of those is a case where continuing
-    would hand `solvePnP` a correspondence set it would accept and answer
-    wrongly, so the caller drops the frame and the dive is fitted from the
-    others.
-
-    Raises:
-        TypeError: The image is not uint8.
-        ValueError: The image is not grey, BGR or BGRA.
-    """
-    gray = _to_grayscale(image)
+    """One seeded detection through every gate, or None."""
     cv2.setRNGSeed(int(seed))
     found, corners, meta = cv2.findChessboardCornersSBWithMeta(
         gray, _REQUESTED_PATTERN, _DETECTION_FLAGS
@@ -420,27 +489,85 @@ def detect_checkerboard(
 
     # Is it actually a grid? Refused here rather than downstream because
     # everything downstream accepts it silently — see
-    # `MAX_GRID_RESIDUAL_FRACTION`.
+    # `MAX_GRID_RESIDUAL_FRACTION` and `MAX_DROPPED_CORNERS`.
     #
     # `isfinite` first and explicitly: a NaN spacing makes every comparison
     # False, so a bare `spacing <= 0` would ACCEPT it and then divide the
     # threshold by nothing. The safe reading of "no measurable spacing" is
     # refusal.
     spacing = median_corner_spacing(image_points, rows, cols)
-    if (
-        not math.isfinite(spacing)
-        or spacing <= 0
-        or grid_residual_px(body_points, image_points)
-        > MAX_GRID_RESIDUAL_FRACTION * spacing
-    ):
+    if not math.isfinite(spacing) or spacing <= 0:
         return None
-    # A perfect grid at the wrong pitch: see `MIN_CHECKER_PARITY`.
+    keep = _drop_displaced_corners(body_points, image_points, spacing)
+    if keep is None:
+        return None
+    # A perfect grid at the wrong pitch: see `MIN_CHECKER_PARITY`. Scored on
+    # the whole lattice; a dragged corner moves no cell centre measurably.
     if checker_parity(gray, body_points, image_points, rows, cols) < MIN_CHECKER_PARITY:
         return None
 
     return DetectedCheckerboard(
         rows=rows,
         cols=cols,
-        body_points=body_points,
-        image_points=image_points,
+        body_points=body_points[keep],
+        image_points=image_points[keep],
+        grid_image_points=image_points,
+        dropped=tuple(int(k) for k in np.flatnonzero(np.logical_not(keep))),
     )
+
+
+# Keyword-only board description plus the seeds.
+# pylint: disable-next=too-many-arguments
+def detect_checkerboard(
+    image: np.ndarray,
+    *,
+    max_rows: int,
+    max_cols: int,
+    pitch_x_m: float,
+    pitch_y_m: float,
+    seeds: Sequence[int] = DEFAULT_SEEDS,
+    seed: int | None = None,
+) -> DetectedCheckerboard | None:
+    """Detect the board in `image` and pair its corners with board coordinates.
+
+    `image` must be the **rectified** frame, full resolution, uint8, grey,
+    BGR or BGRA. `max_rows` / `max_cols` are the declared board's interior
+    corners and act as an upper bound, not a target. `pitch_x_m` /
+    `pitch_y_m` are the measured grid pitch along a declared row and down a
+    declared column.
+
+    `seeds` are tried in order, each seeding OpenCV's random generator for one
+    attempt (see the module docstring's note on determinism), and the first
+    detection that passes every gate is returned: the same frame and seeds
+    give the same detection every time. `seed`, when given, tries that one
+    seed only (4.3.0's behaviour).
+
+    Up to `MAX_DROPPED_CORNERS` displaced corners (a laser dot drags the one
+    under it) are dropped from `body_points` / `image_points`; see
+    `DetectedCheckerboard`.
+
+    Returns None when no seed gives a usable board — no detection, a
+    degenerate strip, a grid larger than the declared board, metadata that
+    disagrees with the corners returned, a grid whose axes cannot be told
+    apart on a board whose pitches differ, corners that are not one lattice,
+    or a lattice at the wrong pitch. Every one of those is a case where
+    continuing would hand `solvePnP` a correspondence set it would accept and
+    answer wrongly, so the caller drops the frame and the dive is fitted from
+    the others.
+
+    Raises:
+        TypeError: The image is not uint8.
+        ValueError: The image is not grey, BGR or BGRA.
+    """
+    gray = _to_grayscale(image)
+    board = {
+        "max_rows": max_rows,
+        "max_cols": max_cols,
+        "pitch_x_m": pitch_x_m,
+        "pitch_y_m": pitch_y_m,
+    }
+    for attempt in (seeds if seed is None else (seed,)):
+        detected = _detect_once(gray, attempt, **board)
+        if detected is not None:
+            return detected
+    return None
