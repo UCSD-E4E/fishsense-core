@@ -125,6 +125,31 @@ def test_the_solve_drops_an_implausible_pair_it_is_handed():
     assert dirty.connected.all()
     assert dirty.log_sizes == pytest.approx(clean.log_sizes, abs=1e-12)
     assert dirty.residual_sd == pytest.approx(clean.residual_sd, abs=1e-12)
+    assert (clean.implausible_pairs, dirty.implausible_pairs) == (0, 1)
+
+
+def test_an_implausible_pair_does_not_count_as_a_matched_pair():
+    """The gate counts the pairs the solve takes: 12 frames chained by 11 real
+    pairs and one collapsed one is 11 matched pairs, fewer than frames, which
+    register.score skips. Counted before the bound, it passed and reported 12."""
+    z = np.linspace(1.0, 3.0, 12)
+    dots = np.array([_dot_at(zi) for zi in z])
+    logs = -np.log(z)
+    chain = [sc.PairScale(i, i + 1, logs[i + 1] - logs[i], 20) for i in range(11)]
+    fit = sc.fit_label_free(
+        dots=dots, pairs=[*chain, sc.PairScale(0, 11, -41.1, 5)], camera_matrix=K
+    )
+    assert (fit.outcome, fit.refusal_reason) == ("refused", "too_few_matched_pairs")
+    assert (fit.pairs, fit.implausible_pairs) == (11, 1)
+
+
+def test_a_fit_reports_the_pairs_it_dropped_as_implausible():
+    z = np.linspace(1.0, 3.0, 12)
+    dots = np.array([_dot_at(zi) for zi in z])
+    pairs = [*_exact_pairs(z), sc.PairScale(5, 10, -41.1, 5)]
+    fit = sc.fit_label_free(dots=dots, pairs=pairs, camera_matrix=K)
+    assert fit.outcome == "accepted"
+    assert (fit.pairs, fit.implausible_pairs) == (len(pairs) - 1, 1)
 
 
 def test_bootstrap_reproduces_cscws_standard_errors():
@@ -479,6 +504,19 @@ def test_a_malformed_pair_is_an_error_not_silent_zeros(bad):
         sc.solve_log_sizes(12, pairs)
 
 
+def test_a_fit_raises_on_a_malformed_pair_before_counting_pairs():
+    """An inf scale is malformed, not implausible: the fit raises, rather
+    than refusing for the 11 good pairs left."""
+    z = np.linspace(1.0, 3.0, 12)
+    dots = np.array([_dot_at(zi) for zi in z])
+    logs = -np.log(z)
+    chain = [sc.PairScale(i, i + 1, logs[i + 1] - logs[i], 20) for i in range(11)]
+    with pytest.raises(ValueError):
+        sc.fit_label_free(
+            dots=dots, pairs=[*chain, sc.PairScale(0, 11, float("inf"), 5)], camera_matrix=K
+        )
+
+
 def test_with_no_line_the_direction_follows_the_trim():
     """A detector dot far off the true line, on a frame whose size puts it at
     the wrong range: the trim drops it, and the direction is refitted from the
@@ -581,6 +619,16 @@ def test_registration_refuses_inliers_inside_the_ransac_tolerance():
     ratio is plausible; it is not measured."""
     a, b, dot = _similar_features(0.5, half_width=10, n=60)
     assert sc.pair_scale(a, b, dot) is None
+
+
+def test_registration_keeps_a_compact_layer_it_magnifies():
+    """Only `b`'s spread measures the scale (RANSAC's tolerance is in `b`): a
+    3 px RMS patch magnified 5x spreads 16 px there, so scales off by more
+    than ~RANSAC_PX / 16 miss it. A tight `a` alone is no collapse."""
+    a, b, dot = _similar_features(5.0, half_width=4, n=60)
+    got = sc.pair_scale(a, b, dot)
+    assert got is not None
+    assert got[0] == pytest.approx(np.log(5.0), abs=1e-3)
 
 
 def test_registration_refuses_a_similarity_that_collapses_the_object():
