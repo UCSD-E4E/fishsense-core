@@ -997,7 +997,7 @@ def test_an_unknown_shape_is_a_clear_error():
 #    509 capture 133042: worst 0.201, second-worst 0.018);
 #  * 18 boards refused because seed 0 drew a partial grid while another
 #    seed found the whole board.
-# The tests below put those two shapes through the public API.
+# The tests below put those shapes through the public API.
 
 
 def _real_corners(img):
@@ -1011,7 +1011,8 @@ def _real_corners(img):
 
 
 def _detector_returning(monkeypatch, by_seed):
-    """Make OpenCV's detector answer per seed: by_seed(seed) -> (corners, shape) or None."""
+    """OpenCV's detector, answering per seed: by_seed(seed) -> (corners,
+    shape), or None for "no grid found"."""
     state = {"seed": None}
     real_seed = cv2.setRNGSeed
 
@@ -1030,10 +1031,15 @@ def _detector_returning(monkeypatch, by_seed):
     monkeypatch.setattr(sut.cv2, "findChessboardCornersSBWithMeta", find)
 
 
-def test_a_board_with_one_corner_dragged_by_the_dot_is_kept(monkeypatch):
-    """4.3.0 refused it on the worst corner. The dragged corner is dropped
-    from the correspondences, so it never reaches solvePnP, and the board is
-    kept."""
+def _subgrid(corners, shape, rows, cols):
+    """The top-left rows x cols corners of a detected grid."""
+    return corners.reshape(*shape, 2)[:rows, :cols].reshape(-1, 2), (rows, cols)
+
+
+def test_a_board_with_one_corner_dragged_by_the_dot_is_kept_and_repaired(monkeypatch):
+    """4.3.0 refused it on the worst corner. The dragged corner is replaced by
+    where the other corners put it, so the pose never sees the dragged
+    position and the shape stays the full grid."""
     img = _render()
     corners, shape = _real_corners(img)
     spacing = sut.median_corner_spacing(corners, *shape)
@@ -1043,10 +1049,11 @@ def test_a_board_with_one_corner_dragged_by_the_dot_is_kept(monkeypatch):
 
     detected = _detect(img)
 
-    assert detected is not None
-    assert detected.dropped == (37,)
-    assert len(detected.image_points) == shape[0] * shape[1] - 1
-    np.testing.assert_allclose(detected.grid_image_points, dragged.astype(np.float32))
+    assert detected is not None and detected.repaired == (37,)
+    assert detected.image_points.shape == (shape[0] * shape[1], 2)
+    assert np.linalg.norm(detected.image_points[37] - corners[37]) < 0.05 * spacing
+    others = np.arange(len(corners)) != 37
+    np.testing.assert_allclose(detected.image_points[others], dragged[others].astype(np.float32))
 
 
 def test_a_board_seed_zero_misses_is_found_by_the_next_seed(monkeypatch):
@@ -1054,11 +1061,54 @@ def test_a_board_seed_zero_misses_is_found_by_the_next_seed(monkeypatch):
     partial grid the gates refuse while another seed found the whole board."""
     img = _render()
     corners, shape = _real_corners(img)
-    _detector_returning(monkeypatch, lambda seed: None if seed == 0 else (corners, shape))
+    spacing = sut.median_corner_spacing(corners, *shape)
+    refused = corners.copy()
+    refused[[3, 40, 90]] += [0.3 * spacing, 0.0]  # a grid the gates refuse
+    _detector_returning(monkeypatch, lambda seed: (refused, shape) if seed == 0 else (corners, shape))
 
     detected = _detect(img)
 
     assert detected is not None and (detected.rows, detected.cols) == shape
+
+
+def test_a_partial_passing_grid_loses_to_a_full_board_on_a_later_seed(monkeypatch):
+    """The largest passing grid wins: a 6 x 14 sub-grid shrinks the outline
+    and would refuse a dot in the missing rows as off the board."""
+    img = _render()
+    corners, shape = _real_corners(img)
+    part = _subgrid(corners, shape, 6, shape[1])
+    _detector_returning(monkeypatch, lambda seed: part if seed == 0 else (corners, shape))
+    assert (_detect(img).rows, _detect(img).cols) == shape
+
+
+def test_a_full_board_on_the_first_seed_ends_the_search(monkeypatch):
+    img = _render()
+    corners, shape = _real_corners(img)
+    tried = []
+
+    def by_seed(seed):
+        tried.append(seed)
+        return corners, shape
+
+    _detector_returning(monkeypatch, by_seed)
+    assert _detect(img) is not None and tried == [0]
+
+
+def test_no_grid_on_the_first_seed_ends_the_search(monkeypatch):
+    """A frame with no board must not cost eight exhaustive detections."""
+    img = _render()
+    tried = []
+    _detector_returning(monkeypatch, lambda seed: tried.append(seed))
+    assert _detect(img) is None and tried == [0]
+
+
+def test_the_earliest_seed_wins_a_tie(monkeypatch):
+    img = _render()
+    corners, shape = _real_corners(img)
+    first = _subgrid(corners, shape, 6, shape[1])
+    later = (corners.reshape(*shape, 2)[shape[0] - 6 :].reshape(-1, 2), (6, shape[1]))
+    _detector_returning(monkeypatch, lambda seed: first if seed == 0 else later)
+    np.testing.assert_allclose(_detect(img).image_points, first[0].astype(np.float32))
 
 
 def test_a_board_with_a_corner_a_square_off_is_still_refused(monkeypatch):
@@ -1082,9 +1132,53 @@ def test_three_displaced_corners_are_still_refused(monkeypatch):
     assert _detect(img) is None
 
 
+def test_a_small_grid_cannot_pass_on_repairs(monkeypatch):
+    """Two of a 3 x 3 grid's nine corners off is 22 % of it, not a dragged
+    corner: a grid needs CORNERS_PER_REPAIR corners for each repair."""
+    img = _render()
+    corners, shape = _real_corners(img)
+    small, small_shape = _subgrid(corners, shape, 3, 3)
+    spacing = sut.median_corner_spacing(small, *small_shape)
+    small = small.copy()
+    small[[1, 7]] += [0.3 * spacing, 0.0]
+    _detector_returning(monkeypatch, lambda seed: (small, small_shape))
+    assert _detect(img) is None
+    assert sut.CORNERS_PER_REPAIR > 9
+
+
+def test_the_corner_repaired_is_the_dragged_one_and_lands_on_the_lattice():
+    """The dragged corner, here the grid's own corner where the least-squares
+    fit leans toward it most, is the one picked by its deleted residual and
+    is put back where the lattice says it is."""
+    col, row = np.meshgrid(np.arange(10), np.arange(10))
+    body = np.stack([col.ravel(), row.ravel()], axis=1).astype(np.float64) * SQUARE_SIZE_M
+    spacing = 40.0
+    image = np.stack([col.ravel(), row.ravel()], axis=1).astype(np.float64) * spacing + 200.0
+    truth = image.copy()
+    image[0] += [0.3 * spacing, 0.3 * spacing]  # the grid's own corner
+    repaired, which = sut._repair_displaced_corners(body, image, spacing)  # pylint: disable=protected-access
+    assert which == (0,)
+    np.testing.assert_allclose(repaired[0], truth[0], atol=0.05 * spacing)
+
+
+def test_an_outline_corner_is_repaired_onto_the_lattice(monkeypatch):
+    """The hull is the lattice's: a dot dragging the grid's own corner must
+    not bend the quad the on-board test uses."""
+    img = _render()
+    corners, shape = _real_corners(img)
+    spacing = sut.median_corner_spacing(corners, *shape)
+    dragged = corners.copy()
+    dragged[0] += [0.3 * spacing, 0.3 * spacing]
+    _detector_returning(monkeypatch, lambda seed: (dragged, shape))
+
+    detected = _detect(img)
+
+    assert detected.repaired == (0,)
+    assert np.linalg.norm(np.array(sut.board_hull(detected)[0]) - corners[0]) < 0.05 * spacing
+
+
 def test_a_twice_the_pitch_lattice_is_still_refused_on_every_seed(monkeypatch):
-    """Mission 522 capture 134474's shape: every other column. Trying more
-    seeds must not let it through."""
+    """Mission 522 capture 134474's shape: every other column."""
     img = _render()
     corners, (rows, cols) = _real_corners(img)
     every_other = corners.reshape(rows, cols, 2)[:, ::2].reshape(-1, 2)
@@ -1092,26 +1186,10 @@ def test_a_twice_the_pitch_lattice_is_still_refused_on_every_seed(monkeypatch):
     assert _detect(img) is None
 
 
-def test_seeds_are_tried_in_order_and_the_first_passing_one_wins(monkeypatch):
+def test_a_frame_whose_first_seed_gives_the_full_board_keeps_that_grid():
+    """Every frame 4.3.0 accepted with the whole board keeps its grid."""
     img = _render()
-    corners, shape = _real_corners(img)
-    tried = []
-
-    def by_seed(seed):
-        tried.append(seed)
-        return None if seed < 3 else (corners, shape)
-
-    _detector_returning(monkeypatch, by_seed)
-    assert _detect(img) is not None
-    assert tried == [0, 1, 2, 3]
-
-
-def test_a_frame_that_passes_on_seed_zero_gets_exactly_seed_zeros_grid():
-    """Every frame 4.3.0 accepted keeps its grid: seed 0 is tried first."""
-    img = _occluded(4)
-    np.testing.assert_array_equal(
-        _detect(img).grid_image_points, _detect(img, seed=0).grid_image_points
-    )
+    np.testing.assert_array_equal(_detect(img).image_points, _detect(img, seed=0).image_points)
 
 
 def test_seed_still_pins_a_single_attempt(monkeypatch):
@@ -1122,19 +1200,42 @@ def test_seed_still_pins_a_single_attempt(monkeypatch):
     assert tried == [5]
 
 
-def test_a_clean_board_drops_nothing():
-    detected = _detect(_render())
-    assert detected.dropped == ()
-    np.testing.assert_array_equal(detected.grid_image_points, detected.image_points)
+@pytest.mark.parametrize(
+    "kwargs, match",
+    [({"seeds": ()}, "empty"), ({"seeds": (3, 4), "seed": 0}, "not both")],
+    ids=["empty", "both"],
+)
+def test_the_seed_arguments_are_checked(kwargs, match):
+    with pytest.raises(ValueError, match=match):
+        _detect(_render(), **kwargs)
 
 
-def test_the_outline_uses_the_full_grid_even_when_a_corner_was_dropped():
-    col, row = np.meshgrid(np.arange(14), np.arange(10))
-    grid = np.stack([col.ravel(), row.ravel()], axis=1).astype(np.float64) * 40.0 + 200.0
-    keep = np.ones(len(grid), bool)
-    keep[0] = False  # the outline's own corner
-    dropped = sut.DetectedCheckerboard(
-        rows=10, cols=14, body_points=grid[keep], image_points=grid[keep],
-        grid_image_points=grid, dropped=(0,),
-    )  # fmt: skip
-    assert sut.board_hull(dropped)[0] == [200.0, 200.0]
+def test_a_one_shot_iterable_of_seeds_is_read_once(monkeypatch):
+    img = _render()
+    corners, shape = _real_corners(img)
+    _detector_returning(monkeypatch, lambda seed: None if seed == 0 else (corners, shape))
+    seeds = iter((1, 2))
+    assert _detect(img, seeds=seeds) is not None
+
+
+def test_a_clean_board_repairs_nothing():
+    assert _detect(_render()).repaired == ()
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"image_points": np.zeros((139, 2))},
+        {"body_points": np.zeros((139, 2))},
+        {"repaired": (140,)},
+    ],
+    ids=["image-short", "body-short", "repaired-out-of-range"],
+)
+def test_an_inconsistent_detection_cannot_be_built(kwargs):
+    fields = {
+        "rows": 10, "cols": 14,
+        "body_points": np.zeros((140, 2)), "image_points": np.zeros((140, 2)),
+    }  # fmt: skip
+    fields.update(kwargs)
+    with pytest.raises(ValueError):
+        sut.DetectedCheckerboard(**fields)
