@@ -89,8 +89,10 @@ python/fishsense_core/
                                    #   (angle errors vs a reference) stay in services
     checkerboard.py                # Checkerboard corners paired with board coordinates,
                                    #   feeding plane.plane_from_correspondences. Seeds
-                                   #   OpenCV's per-thread RNG (seed=0) before detecting,
-                                   #   so occluded boards detect the same way every call;
+                                   #   OpenCV's per-thread RNG: a full board on seed 0
+                                   #   ends it, else the largest passing grid of seeds
+                                   #   0..7 (deterministic). Repairs up to 2 corners a
+                                   #   laser dot dragged onto the lattice (`repaired`);
                                    #   a checker-parity gate refuses 2x-pitch lattices
     plane.py                       # Board plane: pose_from_correspondences (the one
                                    #   solvePnP, on RECTIFIED points), plane_from_pose,

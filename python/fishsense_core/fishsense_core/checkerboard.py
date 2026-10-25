@@ -20,8 +20,17 @@ OpenCV's random generator, so the same frame could come back as a different
 sub-grid on each call (measured: a 4-square occluder gave 4 x 10, 5 x 3 and
 3 x 3 over 20 calls), and with it different correspondences, planes and a
 different laser fit. :func:`detect_checkerboard` therefore seeds that
-generator (``seed``, default 0) immediately before detecting. OpenCV's
-generator is per thread, so this resets the calling thread's only.
+generator before each attempt. One fixed seed was not enough: on real frames
+seed 0 sometimes draws a small partial grid while another seed finds the
+whole board (18 of 745 production frames, fishsense-services' survey of
+2026-10-24). So the seeds in :data:`DEFAULT_SEEDS` are tried in order: a
+passing full board on the first ends the search at once (the common case,
+one call), otherwise every seed is tried and the largest passing grid wins,
+earliest seed on a tie. When the first seed finds no grid at all, no other is
+tried: the retries are for a grid the gates refused or a partial one, the
+failure measured, and a frame with no board would otherwise cost eight full
+exhaustive detections. OpenCV's generator is per thread, so this resets the
+calling thread's only.
 
 **The detector is asked for a small grid, and told the real one.**
 `findChessboardCornersSB` with `CALIB_CB_LARGER` returns whatever grid it
@@ -73,6 +82,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Sequence
 
 import cv2
 import numpy as np
@@ -81,7 +91,11 @@ import numpy as np
 # pylint: disable=no-member
 
 __all__ = [
+    "CORNERS_PER_REPAIR",
+    "DEFAULT_SEEDS",
     "DetectedCheckerboard",
+    "MAX_REPAIRED_CORNERS",
+    "MAX_REPAIRED_CORNER_FRACTION",
     "MAX_GRID_RESIDUAL_FRACTION",
     "MIN_CHECKER_PARITY",
     "MIN_GRID_SIDE",
@@ -120,8 +134,18 @@ MIN_GRID_SIDE = 3
 #: sizes) under OpenCV 5.0: the worst genuine corner sits at 0.05-1.5 % of the
 #: spacing (an occluder's edge corner is the 1.5 %), against 5 % here. An
 #: incoherent detection (corners that are not one lattice) lands far above.
-#: Re-measure on real underwater frames before tightening it; the safe
-#: direction is to drop frames (there are 28-133 per calibration dive).
+#:
+#: **Measured on real frames** (fishsense-services, 2026-10-25: all 745
+#: production checkerboard renders, 17 missions, the E4E 10 x 14 board; the
+#: 640 accepted, repaired corners excluded), as fractions of the spacing:
+#: worst corner p50 0.015, p95 0.032, p99 0.040, max 0.049; second-worst max
+#: 0.037. So real genuine corners reach right up to this bound, and a genuine
+#: corner just past it is repaired rather than refusing the board (see
+#: `MAX_REPAIRED_CORNERS`), which is why the bound is safe this tight. Do not
+#: tighten it: it would turn genuine boards into repairs, and past the repair
+#: cap into refusals. Those were rectified JPEG renders; production detects on
+#: a fresh rectification of the raw frame, which may score slightly
+#: differently.
 #:
 #: It **cannot** see a uniform scale error: corners two squares apart labelled
 #: one apart are still a perfect grid. :data:`MIN_CHECKER_PARITY` catches that.
@@ -159,6 +183,34 @@ _REQUESTED_PATTERN = (MIN_GRID_SIDE, MIN_GRID_SIDE)
 _DETECTION_FLAGS = cv2.CALIB_CB_EXHAUSTIVE | cv2.CALIB_CB_ACCURACY | cv2.CALIB_CB_LARGER
 
 
+#: The most detected corners that may be repaired as displaced, and how
+#: densely: at most one per `CORNERS_PER_REPAIR` corners of the grid, and never
+#: more than this many.
+#:
+#: A laser dot on the board pulls the sub-pixel refinement of the corner
+#: under it: on real frames one corner lands 9-11 px (0.18-0.20 of the
+#: spacing) off a grid whose every other corner is under 1 px. Those are
+#: exactly the frames calibration needs, the dot on the board, so refusing
+#: them on the worst corner (as 4.3.0 did, 11 of 745 production frames) was
+#: biased against them. Such a corner is repaired (see `DetectedCheckerboard`)
+#: and the grid judged without it. More off than the cap allows is not "a
+#: corner under the dot", it is a grid that is not one lattice, and is
+#: refused. The density limit keeps a small grid from passing on repairs: a
+#: 3 x 3 detection has no corner to spare, and its homography would have
+#: nothing left to judge.
+MAX_REPAIRED_CORNERS = 2
+CORNERS_PER_REPAIR = 50
+
+#: A repaired corner may sit at most this fraction of the spacing off the grid
+#: fitted without it. A dot drags a corner by a fraction of a square; a corner
+#: half a square or more off is a different corner, a lattice error, and the
+#: detection is refused rather than repaired.
+MAX_REPAIRED_CORNER_FRACTION = 0.5
+
+#: The seeds tried (see the module docstring's note on determinism).
+DEFAULT_SEEDS = tuple(range(8))
+
+
 @dataclass(frozen=True)
 class DetectedCheckerboard:
     """A detected grid and its correspondences, index-aligned.
@@ -167,12 +219,36 @@ class DetectedCheckerboard:
     rectified pixels they landed on, both `(rows * cols, 2)` in the detector's
     own row-major order. Ordering is the contract `solvePnP` depends on: it
     pairs them purely by position.
+
+    `repaired` lists the corners (indices into that order) whose measured
+    position a laser dot had dragged off the lattice: each is replaced by
+    where the grid fitted from every other corner puts it, which those
+    corners locate far better than the dragged measurement does. So the
+    shape stays `(rows * cols, 2)`, the outline (`board_hull`) and the
+    spacing are the lattice's, and the pose never sees the dragged position.
+    At most `MAX_REPAIRED_CORNERS`; empty for almost every frame.
+
+    Raises:
+        ValueError: The points are not `(rows * cols, 2)` each, or a repaired
+            index is outside the grid.
     """
 
     rows: int
     cols: int
     body_points: np.ndarray
     image_points: np.ndarray
+    repaired: tuple[int, ...] = ()
+
+    def __post_init__(self):
+        n = self.rows * self.cols
+        for name in ("body_points", "image_points"):
+            shape = np.shape(getattr(self, name))
+            if shape != (n, 2):
+                raise ValueError(
+                    f"{name} must be ({n}, 2) for a {self.rows} x {self.cols} grid, got {shape}"
+                )
+        if any(not 0 <= k < n for k in self.repaired):
+            raise ValueError(f"repaired indices {self.repaired} are outside a {n}-corner grid")
 
 
 def grid_residual_px(body_points: np.ndarray, image_points: np.ndarray) -> float:
@@ -187,16 +263,26 @@ def grid_residual_px(body_points: np.ndarray, image_points: np.ndarray) -> float
     """
     body = np.asarray(body_points, dtype=np.float64)
     image = np.asarray(image_points, dtype=np.float64)
-    matrix, _ = cv2.findHomography(body, image, method=0)
-    if matrix is None:
+    projected = _project(body, image, np.ones(len(body), dtype=bool))
+    if projected is None:
         return float("inf")
+    return float(np.max(np.linalg.norm(projected - image, axis=1)))
 
-    projected = (matrix @ np.hstack([body, np.ones((len(body), 1))]).T).T
+
+def _project(
+    body_points: np.ndarray, image_points: np.ndarray, fit: np.ndarray
+) -> np.ndarray | None:
+    """Every body point mapped through the plain least-squares homography of
+    the ``fit`` corners; None when that homography is undefined. The one copy
+    of the fit and its finite / zero-scale guard."""
+    matrix, _ = cv2.findHomography(body_points[fit], image_points[fit], method=0)
+    if matrix is None:
+        return None
+    projected = (matrix @ np.hstack([body_points, np.ones((len(body_points), 1))]).T).T
     scale = projected[:, 2:3]
     if not np.all(np.isfinite(scale)) or np.any(scale == 0):
-        return float("inf")
-    projected = projected[:, :2] / scale
-    return float(np.max(np.linalg.norm(projected - image, axis=1)))
+        return None
+    return projected[:, :2] / scale
 
 
 def checker_parity(  # pylint: disable=too-many-locals
@@ -272,7 +358,7 @@ def board_hull(detected: DetectedCheckerboard) -> list[list[float]]:
     the cheap thing: 28-133 per calibration dive against `MIN_LASER_POINTS`
     of 2.
     """
-    grid = detected.image_points.reshape(detected.rows, detected.cols, 2)
+    grid = np.asarray(detected.image_points).reshape(detected.rows, detected.cols, 2)
     return [
         [float(x), float(y)]
         for x, y in (grid[0, 0], grid[0, -1], grid[-1, -1], grid[-1, 0])
@@ -342,48 +428,93 @@ def pitch_per_detected_axis(  # pylint: disable=too-many-arguments
     return None
 
 
-# Keyword-only board description plus the seed; one return per refusal, each
-# a distinct reason a frame is dropped.
+def _repair_displaced_corners(
+    body_points: np.ndarray, image_points: np.ndarray, spacing: float
+) -> tuple[np.ndarray, tuple[int, ...]] | None:
+    """``(image points, repaired indices)``, or None when the grid is not one
+    lattice.
+
+    While a corner sits beyond `MAX_GRID_RESIDUAL_FRACTION` of the spacing off
+    the grid fitted to the others, the corner to set aside is chosen by its
+    **deleted** residual: its distance from the homography fitted *without*
+    it. A greedy pick of the worst residual under the fit that still includes
+    the dragged corner can blame a neighbour it pulled: rarely, since a grid
+    of 50 or more corners dilutes one corner's pull, but measured on 1,500
+    synthetic grids with two dragged corners side by side at a grid corner,
+    greedy picked wrong 5 times and the deleted residual once. Repeated up
+    to the cap (`MAX_REPAIRED_CORNERS`, one per `CORNERS_PER_REPAIR` corners).
+    Each set-aside corner is then replaced by its position on the grid fitted
+    to the rest. Refused when more are off than the cap, or a set-aside
+    corner is `MAX_REPAIRED_CORNER_FRACTION` of the spacing or more off.
+    Least squares throughout, deliberately not RANSAC: a robust fit would
+    absorb the very corners that reveal the grid is wrong.
+    """
+    n = len(body_points)
+    cap = min(MAX_REPAIRED_CORNERS, n // CORNERS_PER_REPAIR)
+    limit = MAX_GRID_RESIDUAL_FRACTION * spacing
+    fit = np.ones(n, dtype=bool)
+    while True:
+        projected = _project(body_points, image_points, fit)
+        if projected is None:
+            return None
+        residuals = np.linalg.norm(projected - image_points, axis=1)
+        if residuals[fit].max() <= limit:
+            break
+        if (~fit).sum() >= cap:
+            return None
+        fit[_most_displaced(body_points, image_points, fit)] = False
+    set_aside = np.flatnonzero(~fit)
+    if np.any(residuals[set_aside] >= MAX_REPAIRED_CORNER_FRACTION * spacing):
+        return None
+    repaired = image_points.copy()
+    repaired[set_aside] = projected[set_aside]
+    return repaired, tuple(int(k) for k in set_aside)
+
+
+def _most_displaced(body_points: np.ndarray, image_points: np.ndarray, fit: np.ndarray) -> int:
+    """The fitted corner with the largest deleted residual (its distance from
+    the homography of the fitted corners without it). A fit per corner, which
+    runs only on the rare frame with a corner off the lattice."""
+    best, best_residual = -1, -1.0
+    for k in np.flatnonzero(fit):
+        without = fit.copy()
+        without[k] = False
+        projected = _project(body_points, image_points, without)
+        residual = (
+            float("inf")
+            if projected is None
+            else float(np.linalg.norm(projected[k] - image_points[k]))
+        )
+        if residual > best_residual:
+            best, best_residual = int(k), residual
+    return best
+
+
+#: What `_detect_once` returns when the detector found no grid at all, as
+#: opposed to a grid the gates refused (None).
+_NO_GRID = object()
+
+
+# The board description plus the seed; one return per refusal, each a
+# distinct reason a frame is dropped.
 # pylint: disable-next=too-many-locals,too-many-arguments,too-many-return-statements
-def detect_checkerboard(
-    image: np.ndarray,
+def _detect_once(
+    gray: np.ndarray,
+    seed: int,
     *,
     max_rows: int,
     max_cols: int,
     pitch_x_m: float,
     pitch_y_m: float,
-    seed: int = 0,
-) -> DetectedCheckerboard | None:
-    """Detect the board in `image` and pair its corners with board coordinates.
-
-    `image` must be the **rectified** frame, full resolution, uint8, grey,
-    BGR or BGRA. `max_rows` / `max_cols` are the declared board's interior
-    corners and act as an upper bound, not a target. `pitch_x_m` /
-    `pitch_y_m` are the measured grid pitch along a declared row and down a
-    declared column. `seed` seeds OpenCV's random generator for the call (see
-    the module docstring's note on determinism): the same frame and seed give
-    the same detection every time.
-
-    Returns None when no usable board is found — no detection, a degenerate
-    strip, a grid larger than the declared board, metadata that disagrees
-    with the corners returned, a grid whose axes cannot be told apart on a
-    board whose pitches differ, corners that are not one lattice, or a
-    lattice at the wrong pitch. Every one of those is a case where continuing
-    would hand `solvePnP` a correspondence set it would accept and answer
-    wrongly, so the caller drops the frame and the dive is fitted from the
-    others.
-
-    Raises:
-        TypeError: The image is not uint8.
-        ValueError: The image is not grey, BGR or BGRA.
-    """
-    gray = _to_grayscale(image)
+) -> "DetectedCheckerboard | None | object":
+    """One seeded detection through every gate: the board, None when a grid
+    was found but refused, or `_NO_GRID` when the detector found none."""
     cv2.setRNGSeed(int(seed))
     found, corners, meta = cv2.findChessboardCornersSBWithMeta(
         gray, _REQUESTED_PATTERN, _DETECTION_FLAGS
     )
     if not found or corners is None or meta is None:
-        return None
+        return _NO_GRID
 
     rows, cols = int(meta.shape[0]), int(meta.shape[1])
     if min(rows, cols) < MIN_GRID_SIDE:
@@ -420,21 +551,21 @@ def detect_checkerboard(
 
     # Is it actually a grid? Refused here rather than downstream because
     # everything downstream accepts it silently — see
-    # `MAX_GRID_RESIDUAL_FRACTION`.
+    # `MAX_GRID_RESIDUAL_FRACTION` and `MAX_REPAIRED_CORNERS`.
     #
     # `isfinite` first and explicitly: a NaN spacing makes every comparison
     # False, so a bare `spacing <= 0` would ACCEPT it and then divide the
     # threshold by nothing. The safe reading of "no measurable spacing" is
     # refusal.
     spacing = median_corner_spacing(image_points, rows, cols)
-    if (
-        not math.isfinite(spacing)
-        or spacing <= 0
-        or grid_residual_px(body_points, image_points)
-        > MAX_GRID_RESIDUAL_FRACTION * spacing
-    ):
+    if not math.isfinite(spacing) or spacing <= 0:
         return None
-    # A perfect grid at the wrong pitch: see `MIN_CHECKER_PARITY`.
+    repair = _repair_displaced_corners(body_points, image_points, spacing)
+    if repair is None:
+        return None
+    image_points, repaired = repair
+    # A perfect grid at the wrong pitch: see `MIN_CHECKER_PARITY`. Scored on
+    # the whole lattice; a dragged corner moves no cell centre measurably.
     if checker_parity(gray, body_points, image_points, rows, cols) < MIN_CHECKER_PARITY:
         return None
 
@@ -443,4 +574,81 @@ def detect_checkerboard(
         cols=cols,
         body_points=body_points,
         image_points=image_points,
+        repaired=repaired,
     )
+
+
+# Keyword-only board description plus the seeds.
+# pylint: disable-next=too-many-arguments
+def detect_checkerboard(
+    image: np.ndarray,
+    *,
+    max_rows: int,
+    max_cols: int,
+    pitch_x_m: float,
+    pitch_y_m: float,
+    seeds: Sequence[int] = DEFAULT_SEEDS,
+    seed: int | None = None,
+) -> DetectedCheckerboard | None:
+    """Detect the board in `image` and pair its corners with board coordinates.
+
+    `image` must be the **rectified** frame, full resolution, uint8, grey,
+    BGR or BGRA. `max_rows` / `max_cols` are the declared board's interior
+    corners and act as an upper bound, not a target. `pitch_x_m` /
+    `pitch_y_m` are the measured grid pitch along a declared row and down a
+    declared column.
+
+    `seeds` seed OpenCV's random generator, one attempt each, as the module
+    docstring's note on determinism describes: a passing full board ends the
+    search, a first seed with no grid at all ends it with None, and otherwise
+    the largest passing grid wins, earliest seed on a tie. The same frame and
+    seeds give the same detection every time. `seed` instead tries that one
+    seed only (4.3.0's behaviour).
+
+    Up to `MAX_REPAIRED_CORNERS` corners a laser dot dragged are repaired; see
+    `DetectedCheckerboard`.
+
+    Returns None when no seed gives a usable board — no detection, a
+    degenerate strip, a grid larger than the declared board, metadata that
+    disagrees with the corners returned, a grid whose axes cannot be told
+    apart on a board whose pitches differ, corners that are not one lattice,
+    or a lattice at the wrong pitch. Every one of those is a case where
+    continuing would hand `solvePnP` a correspondence set it would accept and
+    answer wrongly, so the caller drops the frame and the dive is fitted from
+    the others.
+
+    Raises:
+        TypeError: The image is not uint8.
+        ValueError: The image is not grey, BGR or BGRA; or both `seeds` and
+            `seed` were given; or `seeds` is empty, which would try nothing
+            and read as "no board".
+    """
+    if seed is not None:
+        if tuple(seeds) != DEFAULT_SEEDS:
+            raise ValueError("pass seeds= or seed=, not both")
+        attempts: tuple[int, ...] = (int(seed),)
+    else:
+        attempts = tuple(int(k) for k in seeds)
+    if not attempts:
+        raise ValueError("seeds is empty: no detection would be attempted")
+    gray = _to_grayscale(image)
+    board = {
+        "max_rows": max_rows,
+        "max_cols": max_cols,
+        "pitch_x_m": pitch_x_m,
+        "pitch_y_m": pitch_y_m,
+    }
+    best: DetectedCheckerboard | None = None
+    for index, attempt in enumerate(attempts):
+        detected = _detect_once(gray, attempt, **board)
+        if detected is _NO_GRID:
+            if index == 0:
+                return None
+            continue
+        if detected is None:
+            continue
+        if detected.rows * detected.cols == max_rows * max_cols:
+            return detected  # the whole board: nothing larger to find
+        if best is None or detected.rows * detected.cols > best.rows * best.cols:
+            best = detected
+    return best
