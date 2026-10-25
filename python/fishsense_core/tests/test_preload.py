@@ -165,6 +165,48 @@ def test_preload_loads_only_the_runtime_libraries_in_dependency_order(monkeypatc
     ]
 
 
+def test_preload_loads_cudnn_sub_libraries_after_their_dependencies(monkeypatch, tmp_path):
+    """cuDNN 9's adv and cnn need ops, and every sub-library needs graph
+    (DT_NEEDED, nvidia-cudnn-cu12 9.27): alphabetical order loads adv, cnn
+    and the engines first. graph and ops lead; each library loads once."""
+    nvidia_root = tmp_path / "nvidia"
+    lib_dir = nvidia_root / "cudnn" / "lib"
+    lib_dir.mkdir(parents=True)
+    names = (
+        "libcudnn.so.9", "libcudnn_adv.so.9", "libcudnn_cnn.so.9",
+        "libcudnn_engines_precompiled.so.9", "libcudnn_graph.so.9",
+        "libcudnn_heuristic.so.9", "libcudnn_ops.so.9",
+    )  # fmt: skip
+    for lib in names:
+        (lib_dir / lib).write_bytes(b"")
+    monkeypatch.setitem(sys.modules, "nvidia", _namespace_module(nvidia_root))
+
+    loaded = []
+    monkeypatch.setattr(ctypes, "CDLL", lambda path, mode=0: loaded.append(path))
+
+    fishsense_core._preload_nvidia_libs()  # pylint: disable=protected-access
+
+    order = [os.path.basename(p) for p in loaded]
+    assert sorted(order) == sorted(names)
+    assert order[:2] == ["libcudnn_graph.so.9", "libcudnn_ops.so.9"]
+
+
+def test_preload_lists_each_root_once(monkeypatch, tmp_path):
+    """One directory scan per root at import, not one per pattern."""
+    nvidia_root = _fake_nvidia_tree(tmp_path)
+    monkeypatch.setitem(sys.modules, "nvidia", _namespace_module(nvidia_root))
+    monkeypatch.setattr(ctypes, "CDLL", lambda path, mode=0: None)
+    scans = []
+    real_glob = fishsense_core.glob
+    monkeypatch.setattr(
+        fishsense_core, "glob", lambda pattern: scans.append(pattern) or real_glob(pattern)
+    )
+
+    fishsense_core._preload_nvidia_libs()  # pylint: disable=protected-access
+
+    assert len(scans) == 1
+
+
 def test_preload_falls_back_to_file_for_regular_package(monkeypatch, tmp_path):
     """A conventional (non-namespace) `nvidia` package still resolves."""
     nvidia_root = _fake_nvidia_tree(tmp_path)
