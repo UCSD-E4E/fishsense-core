@@ -1,5 +1,17 @@
 # Changelog
 
+## [4.3.2](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v4.3.1...fishsense-core-v4.3.2) (2026-10-25)
+
+
+### Bug Fixes
+
+* **cuda:** don't preload NVBLAS, it hijacks every CPU BLAS ([ed50a6d](https://github.com/UCSD-E4E/fishsense-core/commit/ed50a6dce73282c2aac726bcaad12e2652b40642))
+* **cuda:** load cuDNN's graph and ops before the sub-libraries that need them ([254b464](https://github.com/UCSD-E4E/fishsense-core/commit/254b46440ffca83c5319ab6a51b9433ad431c1ec))
+* **cuda:** preload a list of CUDA runtime libraries, not every .so ([6f26bd1](https://github.com/UCSD-E4E/fishsense-core/commit/6f26bd1f8fe1b10792739c1a54080278b1a0e2d8))
+* **size-constancy:** count only plausible pairs as matched, and report the rest ([17f590a](https://github.com/UCSD-E4E/fishsense-core/commit/17f590a37e226c2f6eccf288a86408079481d542))
+* **size-constancy:** refuse unmeasured scales by inlier spread, bound every solved pair ([f35fa9b](https://github.com/UCSD-E4E/fishsense-core/commit/f35fa9bdf53b1831c64e6f218a1b5db5c33f8ac1))
+* **size-constancy:** reject a pair whose similarity collapses the object ([69b7959](https://github.com/UCSD-E4E/fishsense-core/commit/69b795998ecc070347c0e0f52d2497c1b61c1d3e))
+
 ## [4.3.1](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v4.3.0...fishsense-core-v4.3.1) (2026-10-25)
 
 
