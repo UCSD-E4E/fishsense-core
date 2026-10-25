@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.3.1](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v4.3.0...fishsense-core-v4.3.1) (2026-10-25)
+
+
+### Bug Fixes
+
+* **calibration:** keep checkerboards a laser dot or an unlucky seed cost ([#114](https://github.com/UCSD-E4E/fishsense-core/issues/114)) ([cb74fb0](https://github.com/UCSD-E4E/fishsense-core/commit/cb74fb02e1620d9cdf20f771039d7514706e48c3))
+
 ## [4.3.0](https://github.com/UCSD-E4E/fishsense-core/compare/fishsense-core-v4.2.0...fishsense-core-v4.3.0) (2026-10-24)
 
 
